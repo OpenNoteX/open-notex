@@ -7,7 +7,9 @@ Rust, [Rune](https://github.com/anomalyco/rune) for the UI, SQLite for the store
 (the shell) are done: the app opens a window with a sidebar, a list and a detail
 pane, in light and dark, and renders every screen headlessly for review.
 
-![The Today screen in light mode](docs/images/shell-light.png)
+| Light | Dark |
+| --- | --- |
+| ![Today, light](docs/images/snaps/shell-today-light-1x.png) | ![Today, dark](docs/images/snaps/shell-today-dark-1x.png) |
 
 ## The idea
 
@@ -57,8 +59,8 @@ cargo xtask snap                      # PNG + element tree for every scene
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (Rust 1.99.1) to match Rune.
-`cargo xtask snap` writes to `artifacts/snaps`, which is not committed; the two
-images in `docs/images/` are the reference stills.
+`cargo xtask snap` writes to `artifacts/snaps`, which is not committed; the
+stills in `docs/images/snaps/` are the reference set, one per scene per theme.
 
 ## Read next
 
