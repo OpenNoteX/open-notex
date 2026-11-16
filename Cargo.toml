@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"
+repository = "https://github.com/OpenNoteX/open-notex"
+
+[workspace.dependencies]
+notex-core = { path = "crates/notex-core" }
+notex-time = { path = "crates/notex-time" }
+notex-store = { path = "crates/notex-store" }
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+ulid = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
