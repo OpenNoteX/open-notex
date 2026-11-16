@@ -1,0 +1,9 @@
+[
+  { "t": 0.4, "type": "click", "key": "nav-projects" },
+  { "t": 1.2, "type": "click", "key": "nav-notes" },
+  { "t": 2.0, "type": "click", "key": "nav-habits" },
+  { "t": 2.8, "type": "key", "name": "k", "cmd": true },
+  { "t": 3.6, "type": "key", "name": ",", "cmd": true },
+  { "t": 4.4, "type": "click", "key": "nav-inbox" },
+  { "t": 5.2, "type": "key", "name": "b", "cmd": true, "shift": true }
+]

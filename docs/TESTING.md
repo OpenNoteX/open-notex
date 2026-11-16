@@ -72,6 +72,22 @@ cargo xtask seed --count 10000 --dir /tmp/notex-bench
 cargo xtask bench --db /tmp/notex-bench/bench.db
 ```
 
+## Storyboards
+
+A still strip shows a sequence of states without a video encoder. `cargo run -p
+open-notex -- …` has Rune's tooling in a debug build:
+
+```sh
+cargo run -p open-notex -- --script docs/storyboards/nav.json \
+    --strip artifacts/nav-light.png --every 24 --cols 2 --fps 30 \
+    --duration 6 --theme light --scale 1
+```
+
+`docs/storyboards/nav-light.png` is that command's output: a sidebar row, Search,
+Settings, then the sidebar hidden, one beat apart. `--every 24` samples it at
+0.8 s at 30 fps, so no tile lands mid-animation. Change the script to show a
+different sequence; the PNGs and trees from `xtask snap` remain the review set.
+
 ## CI
 
 macOS for the app, Linux for the pure crates. `fmt`, `clippy -D warnings`,
