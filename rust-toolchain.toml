@@ -1,0 +1,4 @@
+# Matches the channel Rune pins in its own repository. Bump both together.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
