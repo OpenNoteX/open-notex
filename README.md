@@ -3,8 +3,11 @@
 Local-first notes, tasks, habits and reminders in one app.
 Rust, [Rune](https://github.com/anomalyco/rune) for the UI, SQLite for the store.
 
-**Status: `0.0.1` pre-alpha.** M0 is in progress: the project context, the
-workspace, and the store/time foundations exist. There is no window yet.
+**Status: `0.0.1` pre-alpha.** M0 (context, workspace, store, time, CI) and M0.5
+(the shell) are done: the app opens a window with a sidebar, a list and a detail
+pane, in light and dark, and renders every screen headlessly for review.
+
+![The Today screen in light mode](docs/images/shell-light.png)
 
 ## The idea
 
@@ -35,20 +38,27 @@ They share one concept of "today", so the Today screen is the product.
 crates/notex-core    entities, ids, invariants (no I/O)
 crates/notex-time    day keys, recurrence, streaks, scheduler decisions (pure)
 crates/notex-store   SQLite (migrations, pragmas, FTS, oplog) + Markdown vault
+crates/notex-ui      the shell: routes, theme, three panes (pure view, no I/O)
+apps/open-notex      the binary: window, key handling, the app's lifetime
+vendor/              Rune's patched dependencies, copied at its pinned revision
 xtask                seed data, benchmarks, snapshot runner
 docs/                plan, architecture, data model, scheduling, testing
 ```
 
-## Build
+## Build and run
 
 ```sh
 cargo build
+cargo run -p open-notex               # opens the window
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
+cargo xtask snap                      # PNG + element tree for every scene
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (Rust 1.99.1) to match Rune.
+`cargo xtask snap` writes to `artifacts/snaps`, which is not committed; the two
+images in `docs/images/` are the reference stills.
 
 ## Read next
 

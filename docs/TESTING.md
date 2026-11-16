@@ -66,6 +66,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p notex-time -- --nocapture
+cargo test -p notex-ui            # headless shell tests
+cargo xtask snap                  # PNG + element tree for every scene
 cargo xtask seed --count 10000 --dir /tmp/notex-bench
 cargo xtask bench --db /tmp/notex-bench/bench.db
 ```
