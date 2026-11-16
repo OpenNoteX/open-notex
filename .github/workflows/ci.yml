@@ -9,8 +9,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  # The pure layers build everywhere. They are the bulk of the logic and the
+  # fastest signal, so they run on Linux and macOS.
+  core:
+    name: core (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,21 +33,57 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy -p notex-core -p notex-time -p notex-store --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test -p notex-core -p notex-time -p notex-store
 
       - name: Seed and index a fixture vault
         run: |
-          cargo run -p xtask -- seed --count 250 --dir artifacts/vault --db artifacts/bench.db
-          cargo run -p xtask -- bench --db artifacts/bench.db
+          cargo xtask seed --count 250 --dir artifacts/vault --db artifacts/bench.db
+          cargo xtask bench --db artifacts/bench.db
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: m0-artifacts-${{ matrix.os }}
+          name: core-artifacts-${{ matrix.os }}
           path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The app builds on macOS only until M6 (decision 0006): Rune's window,
+  # Metal and the snapshot renderer are macOS targets here.
+  app:
+    name: app (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Every scene, both themes, through the real binary. The step fails if a
+      # tree is missing the sidebar, the toolbar or a nav row.
+      - name: Snapshots
+        run: cargo xtask snap
+
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-macOS
+          path: artifacts/snaps/
           if-no-files-found: warn
           retention-days: 7
