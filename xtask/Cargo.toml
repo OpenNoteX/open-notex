@@ -1,0 +1,17 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+description = "Developer tasks: seed a vault, benchmark the store, run snapshots."
+
+[dependencies]
+notex-core.workspace = true
+notex-store.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

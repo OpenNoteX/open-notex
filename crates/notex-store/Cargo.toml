@@ -1,0 +1,24 @@
+[package]
+name = "notex-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "SQLite index and Markdown vault for openNoteX."
+
+[dependencies]
+notex-core.workspace = true
+notex-time.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
