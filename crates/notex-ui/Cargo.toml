@@ -1,0 +1,15 @@
+[package]
+name = "notex-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The openNoteX shell: routes, theme and the three-pane layout, rendered by Rune."
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+
+[lints]
+workspace = true
