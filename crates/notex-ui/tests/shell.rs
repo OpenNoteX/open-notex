@@ -173,6 +173,29 @@ fn command_k_opens_search_and_command_comma_opens_settings() {
 }
 
 #[test]
+fn shift_command_b_closes_and_reopens_the_sidebar() {
+    let mut rt = runtime(vault_state());
+    assert!(rt.state.sidebar.is_open());
+
+    let toggle = |rt: &mut Runtime<State>| {
+        rt.key(KeyEvent {
+            key: Key::Command('b'),
+            mods: Mods {
+                cmd: true,
+                shift: true,
+                ..Mods::default()
+            },
+        });
+        rt.frame(1.0 / 60.0);
+    };
+
+    toggle(&mut rt);
+    assert!(!rt.state.sidebar.is_open(), "⇧⌘B closes the sidebar");
+    toggle(&mut rt);
+    assert!(rt.state.sidebar.is_open(), "and opens it again");
+}
+
+#[test]
 fn a_failed_load_shows_the_reason_and_can_be_dismissed() {
     let mut state = vault_state();
     state.load = Load::Failed("the vault is on a disconnected volume".to_owned());
