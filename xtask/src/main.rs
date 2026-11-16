@@ -1,10 +1,11 @@
 //! Developer tasks. Run with `cargo xtask <command>`.
 //!
-//! `seed` and `bench` work today. `snap` needs the Rune shell (M0.5), so it
-//! explains itself rather than pretending to run.
+//! `seed` and `bench` work on the store. `snap` drives the real app binary
+//! headlessly: Rune owns `--scene`, `--snap`, `--tree`, `--theme` and `--scale`,
+//! so the snapshots come from the same code path a person runs, not a copy of it.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Output};
 use std::time::Instant;
 
 use notex_core::ItemId;
@@ -20,10 +21,7 @@ fn main() -> ExitCode {
     let result = match command {
         "seed" => seed(&args[1..]),
         "bench" => bench(&args[1..]),
-        "snap" => {
-            eprintln!("snap: the headless snapshot harness lands with the Rune shell (M0.5).");
-            Ok(())
-        }
+        "snap" => snap(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -49,7 +47,10 @@ fn usage() {
         "usage:
   cargo xtask seed --count N --dir PATH [--db PATH]
   cargo xtask bench --db PATH
-  cargo xtask snap"
+  cargo xtask snap [--scene NAME] [--theme light|dark|both] [--scale N] [--out DIR]
+
+`snap` renders every scene by default. Output: DIR/<scene>-<theme>-<scale>x.png
+plus the matching .tree.json."
     );
 }
 
@@ -143,6 +144,168 @@ fn bench(args: &[String]) -> Result<(), String> {
     println!("database: {:.1} MiB", size as f64 / (1024.0 * 1024.0));
 
     Ok(())
+}
+
+/// Render scenes headlessly and write a PNG plus an element tree for each.
+fn snap(args: &[String]) -> Result<(), String> {
+    build_app()?;
+
+    let out = PathBuf::from(value(args, "out").unwrap_or_else(|| "artifacts/snaps".to_owned()));
+    let scale = value(args, "scale").unwrap_or_else(|| "2".to_owned());
+    std::fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+
+    let themes: Vec<&str> = match value(args, "theme").as_deref() {
+        Some("light") => vec!["light"],
+        Some("dark") => vec!["dark"],
+        Some("both") | None => vec!["light", "dark"],
+        Some(other) => return Err(format!("--theme is light, dark or both, not {other:?}")),
+    };
+
+    let scenes = match value(args, "scene") {
+        Some(scene) => vec![scene],
+        None => list_scenes()?,
+    };
+
+    let mut written = 0;
+    for scene in &scenes {
+        for theme in &themes {
+            let stem = format!("{scene}-{theme}-{scale}x");
+            let png = out.join(format!("{stem}.png"));
+            let tree = out.join(format!("{stem}.tree.json"));
+            let started = Instant::now();
+
+            let output = app()?
+                .arg("--scene")
+                .arg(scene)
+                .arg("--theme")
+                .arg(theme)
+                .arg("--scale")
+                .arg(&scale)
+                .arg("--snap")
+                .arg(&png)
+                .arg("--tree")
+                .arg(&tree)
+                .output()
+                .map_err(|error| format!("could not run the app: {error}"))?;
+            check(&output, scene, theme)?;
+
+            assert_tree(&tree, scene)?;
+            println!(
+                "{}: {} ms, {} KB",
+                stem,
+                started.elapsed().as_millis(),
+                png_size(&png)? / 1024
+            );
+            written += 1;
+        }
+    }
+
+    println!("wrote {written} snapshots to {}", out.display());
+    Ok(())
+}
+
+/// The app's own scene list, so the harness cannot drift from `SCENES`.
+fn list_scenes() -> Result<Vec<String>, String> {
+    let output = app()?
+        .arg("--list-scenes")
+        .output()
+        .map_err(|error| format!("could not run the app: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "listing scenes failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let scenes: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if scenes.is_empty() {
+        return Err("the app listed no scenes".to_owned());
+    }
+    Ok(scenes)
+}
+
+fn check(output: &Output, scene: &str, theme: &str) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "scene {scene} ({theme}) failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// A tree that has a sidebar but no toolbar means the scene rendered a blank
+/// frame, which is the failure a PNG alone cannot catch.
+fn assert_tree(path: &Path, scene: &str) -> Result<(), String> {
+    let tree = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    for key in ["\"sidebar\"", "\"toolbar\"", "\"nav-today\""] {
+        if !tree.contains(key) {
+            return Err(format!("scene {scene}: {key} is missing from the tree"));
+        }
+    }
+    Ok(())
+}
+
+fn png_size(path: &Path) -> Result<u64, String> {
+    std::fs::metadata(path)
+        .map(|meta| meta.len())
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// The app binary. `xtask` is a developer tool, so running a sibling binary is
+/// fine here; the app itself starts no process.
+fn app() -> Result<Command, String> {
+    Ok(Command::new(app_path()?))
+}
+
+fn app_path() -> Result<PathBuf, String> {
+    if let Some(bin) = std::env::var_os("OPEN_NOTEX_BIN") {
+        return Ok(PathBuf::from(bin));
+    }
+
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().unwrap_or_default().join("target"));
+    for profile in ["debug", "release"] {
+        let path = target.join(profile).join("open-notex");
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    Err("build the app first: cargo build -p open-notex".to_owned())
+}
+
+/// Builds the app so a snapshot always reflects the current source.
+/// `OPEN_NOTEX_BIN` opts out, for a binary built elsewhere.
+fn build_app() -> Result<(), String> {
+    if std::env::var_os("OPEN_NOTEX_BIN").is_some() {
+        return Ok(());
+    }
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "-p", "open-notex", "--quiet"])
+        .current_dir(workspace_root()?)
+        .status()
+        .map_err(|error| format!("could not run cargo: {error}"))?;
+    if !status.success() {
+        return Err("cargo build -p open-notex failed".to_owned());
+    }
+    Ok(())
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    // CARGO_MANIFEST_DIR is `xtask/`; the workspace root is its parent.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "xtask has no parent directory".to_owned())
 }
 
 fn value(args: &[String], name: &str) -> Option<String> {

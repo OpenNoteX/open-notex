@@ -19,6 +19,31 @@ gates from M0, not post-launch cleanup.
 Reference point: Rune's own settings window settles at ~70 MB footprint and
 ~0.85% CPU idle, drawing nothing while still. We aim for the same class.
 
+## Measured
+
+M0.5 shell, release build, macOS 27.0.1 on an Apple M5, warm file cache.
+
+| Metric | Measured | Budget |
+| --- | --- | --- |
+| Process start → first pixels (headless) | 31 ms | — |
+| GPU init | 9.4 ms | — |
+| First frame, CPU | 2.9 ms | ≤ 8 ms |
+| State setup (`init`) | 0.05 ms | — |
+| Layout nodes / glyphs / instances, one screen | 88 / 178 / 197 | — |
+| First launch with a cold page cache | 0.6 s | ≤ 400 ms |
+| Settled footprint, idle | 53.6 MB physical, 97 MB RSS | ≤ 100 MB |
+| Peak footprint during startup | 134 MB (GPU upload) | — |
+| Idle CPU, 29 s after the first frame | 0.0%, no wakeups | 0 frames |
+| Threads at rest | 7 | — |
+| Release binary | 28 MB (with Rune's `tooling` feature) | 20–30 MB |
+
+"Process start → first pixels" is Rune's `--first-pixels`, which includes arg
+parsing, state, GPU init and one laid-out, painted frame. The 0.6 s cold-cache
+figure is the same run with the 28 MB binary read from disk for the first time.
+
+The 10k-note rows stay unmeasured until M1, when there is a store to fill. Every
+number above is small enough that the budgets still have room for it.
+
 ## Where memory goes
 
 | Consumer | Budget | Bound by |
@@ -54,7 +79,8 @@ Reference point: Rune's own settings window settles at ~70 MB footprint and
 - Dev builds: `rune-perf` + `procwatch` report footprint, lifetime peak, fd
   count and frame percentiles, and flag `long-frames`, `memory-growth` and
   `fd-growth`.
-- `cargo xtask bench --items 50000`: prints the table above.
+- `cargo xtask seed --count 50000 --dir artifacts/vault --db artifacts/bench.db`,
+  then `cargo xtask bench --db artifacts/bench.db`: prints the table above.
 - Manual: `footprint`, `vmmap`, Instruments (Allocations, Metal System Trace) at
   every milestone.
 - Soak: 200 edits/hour for 24 h; footprint floor must not rise by 64 MiB.

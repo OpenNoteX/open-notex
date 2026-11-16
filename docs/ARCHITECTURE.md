@@ -3,7 +3,7 @@
 Two threads, one writer, one renderer.
 
 ```
-┌──────────────────────────── applications/open-notex ────────────────────────────┐
+┌─────────────────────────────── apps/open-notex ────────────────────────────────┐
 │ AppSpec::setup / poll / on_key / on_open_url / on_reopen                        │
 │                                                                                 │
 │   ┌──────────────┐   Cmd (mpsc)   ┌───────────────────────────────────────┐     │
@@ -32,7 +32,6 @@ OS event → handler mutates &mut State → view(&State) → diff → layout →
   is zero.
 
 ## Data ownership
-
 | Data | Owner | Rebuildable |
 | --- | --- | --- |
 | Note body | `.md` file in the vault | never (it is the original) |
@@ -61,6 +60,32 @@ pub enum Evt { NoteSaved(..), Today(..), Progress { .. }, Failed { .. } }
   command reverts the optimistic row and raises a toast.
 - Bulk jobs (`ReindexAll`, import) are one command that emits `Progress` and can
   be cancelled by request id.
+
+## The shell
+
+`crates/notex-ui` owns every pixel. `State` holds the route, the two pane
+widths, the load state and the vault path; `view()` turns that into a tree and
+does nothing else — no I/O, no clock, no history. `apps/open-notex` supplies the
+`AppSpec` and answers the keys the shell owns: `⌘K` (Search), `⌘,` (Settings)
+and the sidebar toggle, which stays Rune's so it matches its own button and
+tooltip.
+
+- `Route` is one enum of ten screens, and it is the only source of the sidebar
+  row, the toolbar title, the empty-state copy, the icon and the `--route`
+  value. A screen cannot exist in one place and not the others.
+- Search and Settings are single-pane; every other route is sidebar, list and
+  detail, decided by `Route::has_detail`.
+- The palette is three seeds — background, ink, accent — resolved by
+  `Kit::from_palette_focus`. Nothing else is hand-picked, so light and dark
+  cannot drift, and tests assert the accent and secondary text clear 3:1.
+- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes, Projects,
+  Settings, Search, loading and failed. `cargo xtask snap` renders each through
+  the real binary in both themes, then asserts the tree still has the sidebar,
+  the toolbar and a nav row.
+
+There is no store yet, so every route is `Load::Ready` with nothing in it. The
+loading and failed states exist now because they are the hardest thing to
+retrofit once a screen has content.
 
 ## Time
 

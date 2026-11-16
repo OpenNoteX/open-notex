@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <command>`: the repo's developer tasks (seed, bench, snap).
+xtask = "run -p xtask --"

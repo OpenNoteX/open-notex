@@ -66,3 +66,20 @@ history. *Reopen if:* users want a midnight boundary; it is a setting.
 
 Numbers in `PERFORMANCE.md` are enforced in CI, not aspirations. *Reopen only by*
 editing the budget table in its own commit with a measurement attached.
+
+## 0011 — Rune is pinned by revision, and its patched dependencies are vendored
+
+Rune has no release cadence, so both `rune` and `rune-kit` come from git at
+`631e8a6` (`dev`) and are upgraded in a single commit with the snapshots
+regenerated. Rune's own `[patch.crates-io]` covers `parley_engine` (bidi rule
+L1, cached shaping), `winit` (Windows taskbar and window placement) and
+`wgpu-hal` (adapter exposure, partial presents); a dependency's patch does not
+apply to a workspace that depends on it, so those three sources are copied
+verbatim into `vendor/` and patched here too. `vendor/README.md` records the
+provenance and the rule against mixing revisions. *Reopen if:* Rune publishes
+crates with the patches merged, or its toolchain requirement moves past our
+pinned Rust.
+
+Rune depends on `tokio` directly (with `wasm-bindgen-futures` and `zbus` behind
+it), so it is in the binary. Our code builds no runtime: threads and channels
+remain the only concurrency, per 0005.

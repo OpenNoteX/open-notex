@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = ["crates/*", "apps/*", "xtask"]
 
 [workspace.package]
 version = "0.0.1"
@@ -13,6 +13,14 @@ repository = "https://github.com/OpenNoteX/open-notex"
 notex-core = { path = "crates/notex-core" }
 notex-time = { path = "crates/notex-time" }
 notex-store = { path = "crates/notex-store" }
+notex-ui = { path = "crates/notex-ui" }
+
+# Rune is pre-release and has no release cadence, so it is pinned by revision.
+# `dev` at 631e8a6. Upgrade in its own commit with snapshots regenerated.
+rune = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190", features = [
+    "markdown",
+] }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
@@ -30,3 +38,13 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 dbg_macro = "warn"
 todo = "warn"
+
+# Rune patches three crates (see its root `Cargo.toml`): parley_engine's bidi rule
+# L1 and cached shaping, winit's taskbar and window placement on Windows, and
+# wgpu-hal's adapter exposure and partial presents. A dependency's `[patch]` does
+# not apply to a workspace that depends on it, so the patched sources are
+# vendored verbatim from Rune at the pinned revision. See `vendor/README.md`.
+[patch.crates-io]
+parley_engine = { path = "vendor/parley_engine" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
+winit = { path = "vendor/winit" }

@@ -1,0 +1,21 @@
+[package]
+name = "open-notex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "openNoteX: notes, tasks, habits and reminders in one local-first app."
+publish = false
+
+[[bin]]
+name = "open-notex"
+path = "src/main.rs"
+
+[dependencies]
+notex-ui.workspace = true
+rune.workspace = true
+rune-kit.workspace = true
+
+[lints]
+workspace = true
