@@ -135,9 +135,14 @@ The detail pane edits the Markdown file itself, frontmatter excluded, so the
 - A save with a stale base hash becomes a conflict banner with Reload and
   Overwrite; autosave stops until the user chooses. A failed save keeps the
   draft and offers Try again.
-- Selecting another note while dirty queues the open behind the save. `⌘S` and
-  the Save button mean "write now"; `on_close` and `on_quit` flush a dirty draft
-  and wait up to 750 ms for the file.
+- Selecting another note while dirty queues the open behind the save. `⌘S`, the
+  Save button and Retry mean "write now"; a refusal does not block a later
+  request, while a conflict waits for Reload or Overwrite.
+- Closing the window keeps the app and its state (`keep_running`), releasing the
+  GPU while it is closed; `⌘Q` ends the process. Both hooks flush a dirty draft
+  and wait up to 750 ms for the file. Rune cannot cancel a quit, so a draft the
+  disk still refuses is written to `~/Library/Application Support/openNoteX/
+  recovery/` as a note with its id, and the path goes to stderr.
 
 ## Time
 
