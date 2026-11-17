@@ -57,6 +57,22 @@ M1a store, release build, same machine, 10k-note fixture from `xtask seed`:
 10k, inside the 8 MB read model budget but not bounded by it. It has to become a
 windowed query before the 50k row is meaningful.
 
+M1b editing, release build, same machine, same 10k fixture:
+
+| Metric | Measured | Budget |
+| --- | --- | --- |
+| `SaveNote` median | 5.1 ms | ≤ 5 ms target |
+| `SaveNote` p95 | 6.3 ms | ≤ 5 ms target, 20 ms gate |
+| — of which file write (atomic + fsync) | 4.2 ms | — |
+| — of which index upsert (one WAL commit) | 1.0 ms | — |
+
+A save is one atomic file write — create, fsync, rename — plus one index
+commit; reading the old body and hashing it costs ~50 µs. The fsync is the whole
+budget: it dominates the 5.1 ms median and its variance sets the p95. Dropping
+it would make a save fast and a power cut lossy, so the target is missed and the
+20 ms gate holds with room. Typing never waits for it either way: the write
+happens on the worker thread, after the frame that asked for it.
+
 First frame does not wait for the index: a warm launch sends `ListNotes` and
 draws the list frame while the worker answers; a fresh launch draws the same
 frame with the list's "opening" state. The 10k cold-start row is therefore the

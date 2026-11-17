@@ -27,6 +27,11 @@ only for wiring and appearance.
 - Vault: atomic write leaves either the old or the new file, never a partial;
   frontmatter round-trips unknown keys; external edits are detected; duplicate
   ids surface as conflicts; `--reindex` restores identical index rows.
+- Saving: `write_body` keeps `id`, tags and unknown frontmatter keys and adds
+  none to a bare file; a save through the worker replaces the body, updates
+  FTS, and keeps the id; a save from a stale hash is a conflict that writes
+  nothing; `force` overwrites; a missing id or file is a typed `SaveFailed` and
+  the worker still answers afterwards.
 - Crash safety: kill the process during a write loop, reopen, `integrity_check`
   is `ok`.
 
@@ -38,15 +43,20 @@ rt.frame(0.0);
 let (x, y) = rt.find("complete-task").unwrap();
 rt.pointer_down(x, y); rt.pointer_up(x, y);
 rt.frame(1.0 / 60.0);
-assert!(rt.state().tasks[0].done);
+assert!(rt.state.tasks[0].done);
 ```
 
 - Element-tree assertions (`--tree`): structure, roles, labels, focus order.
   These block merges.
 - The Notes list asserts one row per note with its title and tags; clicking
-  `list-note-{id}` puts the expected id in `State::wanted`; a body renders its
-  Markdown and drops the leading `# Title` the header already shows; a failed
-  read shows the message and can be dismissed.
+  `list-note-{id}` selects it and opens it through the worker; the editor holds
+  the file's Markdown; a failed read shows the message and can be dismissed.
+- The editor: typing marks the draft `Edited` and offers Save; `⌘S` asks for a
+  save now; autosave fires after the idle delay and not before; text typed while
+  a save is in flight stays dirty; a dirty switch waits for the ack; a conflict
+  shows the banner, blocks the automatic retry and its Overwrite sends
+  `force: true`; a failed save keeps the text and offers Try again. These assert
+  `Action`s from `take_action()`; nothing in the test talks to a worker.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -60,8 +70,11 @@ assert!(rt.state().tasks[0].done);
   readiness and persistence across restart.
 - `apps/open-notex/tests/notes.rs` drives a real `Session` against a temp vault:
   reindex lists both notes, selecting one returns its body, clicking it again
-  does not re-read the file, a missing vault becomes `Load::Failed`, and a
-  database inside the vault is refused.
+  does not re-read the file, an edit passes the idle delay and the Markdown file
+  changes on disk with its frontmatter intact, a file changed underneath the
+  editor is a conflict that leaves the other edit alone until Overwrite, a
+  missing vault becomes `Load::Failed`, and a database inside the vault is
+  refused.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.

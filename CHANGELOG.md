@@ -8,6 +8,24 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- Editing: the Notes detail pane is the note's Markdown file, edited in place
+  with no separate preview. The `# Title` line is the rename control.
+- Autosave: 700 ms after the last keystroke, or 5 s into continuous typing.
+  `⌘S` and a Save button write immediately; closing the window or quitting
+  flushes a dirty draft and waits for the file.
+- A save is guarded by the hash the file had when it was opened. A file changed
+  on disk becomes a conflict banner with Reload and Overwrite instead of a
+  silent clobber; a failed write keeps the draft and offers Try again.
+- Selecting another note while the editor is dirty queues the switch behind the
+  save, so typing is never dropped.
+- `notex-store`: `vault::write_body` (replaces a body and keeps frontmatter, so
+  ids and tags survive an edit) and `vault::file_hash`.
+- `notex-store`: `Cmd::SaveNote { id, body, base_hash, token, force }` and
+  `Evt::Saved`/`SaveConflict`/`SaveFailed`, all echoed with the editor's token.
+- `notex-ui`: `Draft`, `DraftStatus`, `SaveRequest` and `Action`; the
+  `notes-edit` and `notes-conflict` scenes.
+- `cargo xtask bench` measures `SaveNote` and splits it into file and index
+  time.
 - The Notes screen shows the real vault: `apps/open-notex` opens
   `~/Library/Application Support/openNoteX/notex.db`, starts the one DB worker,
   lists every note by title with its tags, and renders the selected note's

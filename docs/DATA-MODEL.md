@@ -165,9 +165,13 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 3. `rev` increases by exactly one per mutation of that row.
 4. FTS rows are written in the same transaction as the index row.
 5. A note body is never written only to SQLite.
-6. `habit_days.primary key` makes checking the same habit twice in one day
+6. A save is guarded: the file's content hash must still match what the editor
+   read, unless the user chose Overwrite. The body is replaced; the frontmatter
+   — `id`, tags and unknown keys — is kept, so an edit cannot change a note's
+   identity.
+7. `habit_days.primary key` makes checking the same habit twice in one day
    idempotent; a second check increments `done_count`.
-7. `reminder_fires.primary key` makes firing idempotent across restarts, clock
+8. `reminder_fires.primary key` makes firing idempotent across restarts, clock
    jumps and duplicate polls.
 
 ## Pragmas
