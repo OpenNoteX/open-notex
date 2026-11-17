@@ -131,6 +131,15 @@ fn bench(args: &[String]) -> Result<(), String> {
         started.elapsed().as_micros()
     );
 
+    // The list the Notes screen asks for, not just a count.
+    let started = Instant::now();
+    let listed = index::notes(&conn).map_err(|error| error.to_string())?;
+    println!(
+        "list: {} rows (notes() took {} µs)",
+        listed.len(),
+        started.elapsed().as_micros()
+    );
+
     for query in ["launch", "planning", "batch", "note"] {
         let started = Instant::now();
         let hits = index::search(&conn, query, 50).map_err(|error| error.to_string())?;
