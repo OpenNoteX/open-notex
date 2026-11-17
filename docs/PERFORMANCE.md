@@ -41,8 +41,29 @@ M0.5 shell, release build, macOS 27.0.1 on an Apple M5, warm file cache.
 parsing, state, GPU init and one laid-out, painted frame. The 0.6 s cold-cache
 figure is the same run with the 28 MB binary read from disk for the first time.
 
-The 10k-note rows stay unmeasured until M1, when there is a store to fill. Every
-number above is small enough that the budgets still have room for it.
+M1a store, release build, same machine, 10k-note fixture from `xtask seed`:
+
+| Metric | Measured | Budget |
+| --- | --- | --- |
+| `--reindex`, 10k notes, empty database | 4.2 s | ≤ 3 s target, 10 s gate |
+| `--reindex`, 10k notes, unchanged vault | 0.21–0.24 s | — |
+| `notes()` list for 10k notes | 0.5 ms | — |
+| FTS query, 50 hits | 3.3–4.2 ms | — |
+| DB size, 10k notes | 11.4 MiB | ≤ 25 MB |
+| Vault scan (10k files, cache warm) | 0.24 s | — |
+
+The 3 s reindex target is still missed on a **cold full rebuild** of 10k notes;
+the 10 s gate holds. The first measurement of the same work was 8.4 s, because
+every note deleted its search row with `WHERE item_id = ?` and `item_id` is
+`UNINDEXED`, so each upsert scanned the whole FTS table. Migration
+`0002_fts_rowid` stores the FTS rowid beside the note and the reindex became
+linear. Batching the vault into one transaction and skipping unchanged files
+took the rest; a warm launch now spends ~0.2 s reading file metadata and writes
+nothing to the database.
+
+Indexing is off the first-frame path: a warm launch answers `ListNotes` before
+it reindexes, and a fresh database shows the list's "opening" state instead of
+an empty list.
 
 ## Where memory goes
 

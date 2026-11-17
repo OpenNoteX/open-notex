@@ -16,9 +16,14 @@ only for wiring and appearance.
 ## Layer 2 — store and vault (real SQLite, temp dirs)
 
 - Migrations: open at version 0 and at every historical version, upgrade to
-  HEAD, assert `user_version` and data preservation.
+  HEAD, assert `user_version` and data preservation. `0002_fts_rowid` backfills
+  the rowid of every existing search row, so a v1 database keeps its search.
 - FTS: prefix, phrase, unicode, delete and update remove stale matches.
 - Oplog: replay produces the same tables; `rev` strictly increases.
+- Notes list: `notes()` sorts by title and parses tags; `note_path()` resolves an
+  id and returns `None` for an unknown one.
+- Reindex: `Batch` writes every note in one transaction, and a repeat scan of an
+  unchanged vault writes nothing — same rows, no new oplog entries, same `rev`.
 - Vault: atomic write leaves either the old or the new file, never a partial;
   frontmatter round-trips unknown keys; external edits are detected; duplicate
   ids surface as conflicts; `--reindex` restores identical index rows.
@@ -38,6 +43,10 @@ assert!(rt.state().tasks[0].done);
 
 - Element-tree assertions (`--tree`): structure, roles, labels, focus order.
   These block merges.
+- The Notes list asserts one row per note with its title and tags; clicking
+  `list-note-{id}` puts the expected id in `State::wanted`; a body renders its
+  Markdown and drops the leading `# Title` the header already shows; a failed
+  read shows the message and can be dismissed.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -49,6 +58,10 @@ assert!(rt.state().tasks[0].done);
 
 - Launch the real binary with `--script` and `--snap`; assert first-frame
   readiness and persistence across restart.
+- `apps/open-notex/tests/notes.rs` drives a real `Session` against a temp vault:
+  reindex lists both notes, selecting one returns its body, clicking it again
+  does not re-read the file, a missing vault becomes `Load::Failed`, and a
+  database inside the vault is refused.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.
