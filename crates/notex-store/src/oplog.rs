@@ -33,19 +33,19 @@ impl<'a> Entry<'a> {
 }
 
 pub fn append(conn: &Connection, entry: Entry<'_>) -> Result<i64, StoreError> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO oplog(entity, entity_id, op, payload, at, device_id, rev)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            entry.entity,
-            entry.entity_id,
-            entry.op,
-            entry.payload,
-            entry.at,
-            entry.device_id,
-            entry.rev
-        ],
-    )?;
+    )?
+    .execute(params![
+        entry.entity,
+        entry.entity_id,
+        entry.op,
+        entry.payload,
+        entry.at,
+        entry.device_id,
+        entry.rev
+    ])?;
     Ok(conn.last_insert_rowid())
 }
 

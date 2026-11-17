@@ -39,13 +39,20 @@ CREATE TABLE note_index(
   tags TEXT NOT NULL,            -- JSON array
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  rev INTEGER NOT NULL DEFAULT 1
+  rev INTEGER NOT NULL DEFAULT 1,
+  fts_rowid INTEGER              -- migration 0002; the note's notes_fts rowid
 );
 CREATE UNIQUE INDEX note_index_path ON note_index(path);
 
 CREATE VIRTUAL TABLE notes_fts USING fts5(
   item_id UNINDEXED, title, body, tokenize = 'unicode61'
 );
+```
+
+`item_id` is `UNINDEXED`, so it cannot be used to find a row: deleting a note's
+search row by `item_id` scans the whole FTS table. `fts_rowid` remembers FTS5's
+own key and every delete goes through it. Migration `0002` backfills it from the
+existing search rows.
 
 -- structured, authoritative in SQLite
 CREATE TABLE lists(

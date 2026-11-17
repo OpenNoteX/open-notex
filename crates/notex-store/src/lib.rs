@@ -18,6 +18,8 @@ pub mod vault;
 pub mod worker;
 
 pub use db::{StoreError, assert_outside_vault, open, open_in_memory};
-pub use index::{SearchHit, delete_note, search, upsert_note};
+pub use index::{
+    Batch, NoteSummary, SearchHit, delete_note, note_path, notes, search, upsert_note,
+};
 pub use vault::{Frontmatter, Note, NoteFile, read_note, scan_paths, write_atomic};
 pub use worker::{Cmd, Evt, Notify, StoreHandle, spawn};
