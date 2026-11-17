@@ -32,6 +32,13 @@ only for wiring and appearance.
   FTS, and keeps the id; a save from a stale hash is a conflict that writes
   nothing; `force` overwrites; a missing id or file is a typed `SaveFailed` and
   the worker still answers afterwards.
+- Creating: a new note is a file with an id in its frontmatter and a `# Title`
+  body before it is listed; a title already used gets `-2`, never a clobber.
+- Deleting: the file leaves the vault for `trash/` with its body intact and the
+  row goes; deleting a note whose file is already gone still removes the row;
+  a reindex prunes rows whose file the scan did not find and logs each prune.
+- Renaming: a save that changes the `# Title` moves the file to the title's slug,
+  keeps the id, and the reply names the file that now holds the text.
 - Crash safety: kill the process during a write loop, reopen, `integrity_check`
   is `ok`.
 
@@ -56,8 +63,12 @@ assert!(rt.state.tasks[0].done);
   a save is in flight stays dirty; a dirty switch waits for the ack; a conflict
   shows the banner, blocks the automatic retry and its Overwrite sends
   `force: true` for that one save only; a failed save keeps the text and Try again sends it again; the
-  list row carries a dirty dot, and a clean one does not. These assert `Action`s
-  from `take_action()`; nothing in the test talks to a worker.
+  list row carries a dirty dot, and a clean one does not. New note (`⌘N` and the
+  list's plus) and delete (`⌘⌫`, the trash button) queue behind a dirty draft and
+  are dropped if that save is refused; delete asks in a dialog and does nothing
+  until `delete-confirm`; a refused create is explained under the list header.
+  These assert `Action`s from `take_action()`; nothing in the test talks to a
+  worker.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -78,6 +89,9 @@ assert!(rt.state.tasks[0].done);
   deleted under the editor fails the close with "no longer in the vault" and
   keeps the text, a missing vault becomes `Load::Failed`, and a database inside
   the vault is refused. A recovery file is written as a valid note with its id.
+  A new note is a real `.md` before its row exists; deleting the open note moves
+  the file to the trash and a reindex agrees; renaming the title moves the file
+  and keeps the id and the frontmatter.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.

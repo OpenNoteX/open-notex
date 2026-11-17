@@ -8,6 +8,14 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- Creating: `⌘N` and a plus in the note list write a real Markdown file with a
+  fresh id and `# Untitled`, then open it. A title already in use gets `-2`.
+- Deleting: `⌘⌫` and the trash button in the detail pane, confirmed in a dialog.
+  The file moves to `~/Library/Application Support/openNoteX/trash/` and the
+  note leaves the list; the body stays recoverable. A file deleted outside the
+  app leaves the list at the next launch (`--reindex` included).
+- Renaming: saving a changed `# Title` renames the file to the title's slug and
+  keeps the note's id and frontmatter.
 - Editing: the Notes detail pane is the note's Markdown file, edited in place
   with no separate preview. The `# Title` line is the rename control.
 - Autosave: 700 ms after the last keystroke, or 5 s into continuous typing.
@@ -26,7 +34,10 @@ All notable changes to this project. The format follows
   `~/Library/Application Support/openNoteX/recovery/` as a valid note with its
   id, instead of disappearing with the process.
 - `notex-store`: `vault::write_body` (replaces a body and keeps frontmatter, so
-  ids and tags survive an edit) and `vault::file_hash`.
+  ids and tags survive an edit), `vault::file_hash`, `vault::create_note`,
+  `vault::file_name_for` with `unique_path_in`, and `vault::move_file`.
+- `notex-store`: `Cmd::CreateNote { title }` and `Cmd::DeleteNote { id }`, with
+  `Evt::Created`, `Evt::Deleted`, `Evt::CreateFailed` and `Evt::DeleteFailed`.
 - `notex-store`: `Cmd::SaveNote { id, body, base_hash, token, force }` and
   `Evt::Saved`/`SaveConflict`/`SaveFailed`, all echoed with the editor's token.
 - `notex-ui`: `Draft`, `DraftStatus`, `SaveRequest` and `Action`; the
@@ -83,6 +94,9 @@ All notable changes to this project. The format follows
 
 ### Fixed
 
+- A note deleted or renamed outside the app stayed in the list after a reindex,
+  and opening it failed. A reindex now prunes rows whose file the scan did not
+  find, and logs the delete.
 - Try again, `⌘S` and the Save button did nothing after a failed save: the
   refusal blocked every later attempt. Asking again now clears it, while a
   conflict still waits for Reload or Overwrite.
