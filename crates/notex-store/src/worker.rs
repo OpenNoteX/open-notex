@@ -25,9 +25,16 @@ pub enum Cmd {
         root: PathBuf,
     },
     /// Write a note body to disk, then index it. File first, index second.
+    ///
+    /// `base_hash` is the hash the note had when it was opened; a different file
+    /// on disk is a conflict, not something to overwrite. `token` is the UI's
+    /// edit revision and comes back on the reply. `force` writes anyway.
     SaveNote {
-        path: PathBuf,
+        id: String,
         body: String,
+        base_hash: u64,
+        token: u64,
+        force: bool,
     },
     /// The list pane's read model.
     ListNotes,
@@ -41,12 +48,40 @@ pub enum Cmd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evt {
     Pong,
-    Indexed { count: u64 },
-    Saved { id: String, hash: u64 },
+    Indexed {
+        count: u64,
+    },
+    Saved {
+        id: String,
+        token: u64,
+        hash: u64,
+        title: String,
+        tags: Vec<String>,
+    },
+    SaveConflict {
+        id: String,
+        token: u64,
+        disk_hash: u64,
+    },
+    SaveFailed {
+        id: String,
+        token: u64,
+        err: String,
+    },
     Notes(Vec<crate::index::NoteSummary>),
-    Opened { id: String, body: String },
-    OpenFailed { id: String, err: String },
-    Failed { op: &'static str, err: String },
+    Opened {
+        id: String,
+        body: String,
+        hash: u64,
+    },
+    OpenFailed {
+        id: String,
+        err: String,
+    },
+    Failed {
+        op: &'static str,
+        err: String,
+    },
 }
 
 /// How the worker tells the UI loop there is work. In the app this wraps Rune's
@@ -172,13 +207,33 @@ fn execute(conn: &mut Connection, cmd: Cmd, device: &str) -> Vec<Evt> {
                 err: error.to_string(),
             }],
         },
-        Cmd::SaveNote { path, body } => match save_note(conn, &path, &body, device) {
-            Ok(note) => vec![Evt::Saved {
-                id: note.file.id.clone(),
+        Cmd::SaveNote {
+            id,
+            body,
+            base_hash,
+            token,
+            force,
+        } => match save_note(conn, &id, &body, base_hash, force, device) {
+            Ok(SaveOutcome::Saved(note)) => vec![Evt::Saved {
+                id,
+                token,
                 hash: note.file.hash,
+                title: note.file.title,
+                tags: note.file.tags,
             }],
-            Err(error) => vec![Evt::Failed {
-                op: "save_note",
+            Ok(SaveOutcome::Missing) => vec![Evt::SaveFailed {
+                id,
+                token,
+                err: "the note is no longer in the vault".to_owned(),
+            }],
+            Ok(SaveOutcome::Conflict { disk_hash }) => vec![Evt::SaveConflict {
+                id,
+                token,
+                disk_hash,
+            }],
+            Err(error) => vec![Evt::SaveFailed {
+                id,
+                token,
                 err: error.to_string(),
             }],
         },
@@ -190,7 +245,7 @@ fn execute(conn: &mut Connection, cmd: Cmd, device: &str) -> Vec<Evt> {
             }],
         },
         Cmd::OpenNote { id } => match open_note(conn, &id) {
-            Ok(Some(body)) => vec![Evt::Opened { id, body }],
+            Ok(Some((body, hash))) => vec![Evt::Opened { id, body, hash }],
             Ok(None) => vec![Evt::OpenFailed {
                 id,
                 err: "the note is no longer in the index".to_owned(),
@@ -214,25 +269,52 @@ fn reindex(conn: &mut Connection, root: &std::path::Path, device: &str) -> Resul
     batch.commit()
 }
 
+enum SaveOutcome {
+    Saved(Note),
+    /// The id is not in the index: the file was deleted or renamed.
+    Missing,
+    /// The file changed on disk since it was opened.
+    Conflict {
+        disk_hash: u64,
+    },
+}
+
 fn save_note(
     conn: &mut Connection,
-    path: &std::path::Path,
+    id: &str,
     body: &str,
+    base_hash: u64,
+    force: bool,
     device: &str,
-) -> Result<Note, StoreError> {
-    vault::write_atomic(path, body)?;
-    let note = vault::read_note(path)?;
+) -> Result<SaveOutcome, StoreError> {
+    let Some(path) = index::note_path(conn, id)? else {
+        return Ok(SaveOutcome::Missing);
+    };
+
+    // The file is the source of truth: if it moved under us, refuse to clobber
+    // it. `force` is the user's explicit "overwrite" after a conflict.
+    if !force {
+        let disk_hash = vault::file_hash(&path)?;
+        if disk_hash != base_hash {
+            return Ok(SaveOutcome::Conflict { disk_hash });
+        }
+    }
+
+    vault::write_body(&path, body)?;
+    let note = vault::read_note(&path)?;
     index::upsert_note(conn, &note.file, &note.body, now_ms(), device)?;
-    Ok(note)
+    Ok(SaveOutcome::Saved(note))
 }
 
 /// Read a body from the vault through the index. `None` means the id is no
-/// longer indexed (deleted or renamed since the list was read).
-fn open_note(conn: &Connection, id: &str) -> Result<Option<String>, StoreError> {
+/// longer indexed (deleted or renamed since the list was read). The hash is the
+/// one the editor sends back on save.
+fn open_note(conn: &Connection, id: &str) -> Result<Option<(String, u64)>, StoreError> {
     let Some(path) = index::note_path(conn, id)? else {
         return Ok(None);
     };
-    Ok(Some(vault::read_note(&path)?.body))
+    let note = vault::read_note(&path)?;
+    Ok(Some((note.body, note.file.hash)))
 }
 
 fn device_id(conn: &Connection) -> Result<String, StoreError> {
@@ -326,13 +408,19 @@ mod tests {
         let id = notes[0].id.clone();
 
         handle.send(Cmd::OpenNote { id: id.clone() }).unwrap();
-        assert_eq!(
-            wait(&handle, &rx),
-            vec![Evt::Opened {
-                id,
-                body: "# A\n\nhello plan\n".to_owned()
-            }]
-        );
+        let opened = wait(&handle, &rx);
+        let [
+            Evt::Opened {
+                id: opened_id,
+                body,
+                hash,
+            },
+        ] = opened.as_slice()
+        else {
+            panic!("expected an opened note, got {opened:?}");
+        };
+        assert_eq!(opened_id, &id);
+        assert_eq!(body, "# A\n\nhello plan\n");
 
         handle
             .send(Cmd::OpenNote {
@@ -346,19 +434,110 @@ mod tests {
 
         handle
             .send(Cmd::SaveNote {
-                path: vault_dir.join("b.md"),
-                body: "# B\n\ntask list\n".to_owned(),
+                id: id.clone(),
+                body: "# A\n\ntask list\n".to_owned(),
+                base_hash: *hash,
+                token: 7,
+                force: false,
             })
             .unwrap();
         let saved = wait(&handle, &rx);
-        assert!(matches!(saved.as_slice(), [Evt::Saved { .. }]));
+        let [
+            Evt::Saved {
+                token,
+                title,
+                hash: saved_hash,
+                ..
+            },
+        ] = saved.as_slice()
+        else {
+            panic!("expected a save, got {saved:?}");
+        };
+        assert_eq!(*token, 7);
+        assert_eq!(title, "A");
+        assert_ne!(*saved_hash, *hash, "the content changed");
+
+        // The body was replaced; the frontmatter the vault adopted was kept.
+        let on_disk = fs::read_to_string(vault_dir.join("a.md")).unwrap();
+        assert!(
+            on_disk.contains("id:"),
+            "the id survived the save: {on_disk}"
+        );
+        assert!(on_disk.contains("task list"), "{on_disk}");
 
         worker.shutdown();
 
         let conn = db::open(&db_path).unwrap();
-        assert_eq!(index::note_count(&conn).unwrap(), 2);
+        assert_eq!(index::note_count(&conn).unwrap(), 1);
         assert_eq!(index::search(&conn, "task", 10).unwrap().len(), 1);
-        assert_eq!(index::search(&conn, "plan", 10).unwrap().len(), 1);
+        assert_eq!(index::search(&conn, "plan", 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_save_from_a_stale_hash_is_a_conflict_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_dir = dir.path().join("vault");
+        fs::create_dir_all(&vault_dir).unwrap();
+        let path = vault_dir.join("a.md");
+        fs::write(&path, "# A\n\nfirst\n").unwrap();
+        let db_path = dir.path().join("notex.db");
+
+        let (tx, rx) = mpsc::channel();
+        let worker = spawn(&db_path, Chan(tx)).unwrap();
+        let handle = worker.handle();
+
+        handle
+            .send(Cmd::Reindex {
+                root: vault_dir.clone(),
+            })
+            .unwrap();
+        wait(&handle, &rx);
+        handle.send(Cmd::ListNotes).unwrap();
+        let listed = wait(&handle, &rx);
+        let [Evt::Notes(notes)] = listed.as_slice() else {
+            panic!("expected notes");
+        };
+        let id = notes[0].id.clone();
+
+        // Someone else edits the file after the editor opened it.
+        fs::write(&path, "# A\n\nfrom another editor\n").unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+
+        handle
+            .send(Cmd::SaveNote {
+                id: id.clone(),
+                body: "# A\n\nmy draft\n".to_owned(),
+                base_hash: 0,
+                token: 1,
+                force: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait(&handle, &rx).as_slice(),
+            [Evt::SaveConflict { id: conflicted, .. }] if conflicted == &id
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            before,
+            "a conflict never touches the file"
+        );
+
+        // Explicit overwrite goes through.
+        handle
+            .send(Cmd::SaveNote {
+                id,
+                body: "# A\n\nmy draft\n".to_owned(),
+                base_hash: 0,
+                token: 2,
+                force: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait(&handle, &rx).as_slice(),
+            [Evt::Saved { token: 2, .. }]
+        ));
+        assert!(fs::read_to_string(&path).unwrap().contains("my draft"));
+        worker.shutdown();
     }
 
     #[test]
@@ -399,30 +578,58 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_save_reports_an_error_instead_of_panicking() {
+    fn a_save_of_a_missing_note_fails_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
+        let vault_dir = dir.path().join("vault");
+        fs::create_dir_all(&vault_dir).unwrap();
+        fs::write(vault_dir.join("a.md"), "# A\n\nhere\n").unwrap();
         let db_path = dir.path().join("notex.db");
         let (tx, rx) = mpsc::channel();
         let worker = spawn(&db_path, Chan(tx)).unwrap();
         let handle = worker.handle();
 
-        // A path whose parent is a file cannot be created.
-        let blocker = dir.path().join("blocker");
-        fs::write(&blocker, "not a directory").unwrap();
-
         handle
-            .send(Cmd::SaveNote {
-                path: blocker.join("note.md"),
-                body: "# Nope\n".to_owned(),
+            .send(Cmd::Reindex {
+                root: vault_dir.clone(),
             })
             .unwrap();
-        let events = wait(&handle, &rx);
+        wait(&handle, &rx);
+        handle.send(Cmd::ListNotes).unwrap();
+        let listed = wait(&handle, &rx);
+        let [Evt::Notes(notes)] = listed.as_slice() else {
+            panic!("expected notes");
+        };
+        let id = notes[0].id.clone();
+
+        // The file disappears between the list and the save.
+        fs::remove_file(vault_dir.join("a.md")).unwrap();
+        handle
+            .send(Cmd::SaveNote {
+                id,
+                body: "# A\n\nlost\n".to_owned(),
+                base_hash: 0,
+                token: 1,
+                force: false,
+            })
+            .unwrap();
         assert!(matches!(
-            events.as_slice(),
-            [Evt::Failed {
-                op: "save_note",
-                ..
-            }]
+            wait(&handle, &rx).as_slice(),
+            [Evt::SaveFailed { token: 1, .. }]
+        ));
+
+        // An id the index never had is a typed failure, not a panic.
+        handle
+            .send(Cmd::SaveNote {
+                id: "missing".to_owned(),
+                body: "x".to_owned(),
+                base_hash: 0,
+                token: 2,
+                force: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            wait(&handle, &rx).as_slice(),
+            [Evt::SaveFailed { token: 2, .. }]
         ));
 
         // The worker still answers after a failure.

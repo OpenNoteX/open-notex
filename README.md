@@ -4,13 +4,17 @@ Local-first notes, tasks, habits and reminders in one app.
 Rust, [Rune](https://github.com/anomalyco/rune) for the UI, SQLite for the store.
 
 **Status: `0.0.1` pre-alpha.** M0 (context, workspace, store, time, CI), M0.5
-(the shell) and M1a are done: the app opens a window, indexes a real vault, lists
-its notes and renders the selected note's Markdown. The note editor is next.
+(the shell), M1a (the store in the app) and M1b (editing) are done: the app opens
+a window, indexes a real vault, lists its notes, edits the selected Markdown file
+in place and saves it with autosave and a conflict guard. Create, delete and the
+vault watcher are next.
 
 | | Light | Dark |
 | --- | --- | --- |
 | Today | ![Today, light](docs/images/snaps/shell-today-light-1x.png) | ![Today, dark](docs/images/snaps/shell-today-dark-1x.png) |
 | Notes | ![Notes, light](docs/images/snaps/notes-list-light-1x.png) | ![Notes, dark](docs/images/snaps/notes-list-dark-1x.png) |
+| Editing | ![Editing, light](docs/images/snaps/notes-edit-light-1x.png) | ![Editing, dark](docs/images/snaps/notes-edit-dark-1x.png) |
+| Conflict | ![Conflict, light](docs/images/snaps/notes-conflict-light-1x.png) | ![Conflict, dark](docs/images/snaps/notes-conflict-dark-1x.png) |
 
 ## The idea
 

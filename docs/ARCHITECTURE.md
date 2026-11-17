@@ -46,10 +46,16 @@ The database lives in the platform data directory, never inside the vault.
 ## The worker contract
 
 ```rust
-pub enum Cmd { Ping, Reindex { root }, ListNotes, OpenNote { id }, SaveNote { path, body }, Shutdown }
+pub enum Cmd {
+    Ping, Reindex { root }, ListNotes, OpenNote { id },
+    SaveNote { id, body, base_hash, token, force }, Shutdown,
+}
 pub enum Evt {
-    Pong, Indexed { count }, Notes(Vec<NoteSummary>), Opened { id, body },
-    OpenFailed { id, err }, Saved { id, hash }, Failed { op, err },
+    Pong, Indexed { count }, Notes(Vec<NoteSummary>),
+    Opened { id, body, hash }, OpenFailed { id, err },
+    Saved { id, token, hash, title, tags },
+    SaveConflict { id, token, disk_hash }, SaveFailed { id, token, err },
+    Failed { op, err },
 }
 ```
 
@@ -57,6 +63,10 @@ pub enum Evt {
   serialized by construction, so there is no `SQLITE_BUSY` and no lock ordering.
 - Replies carry authoritative rows, so the UI replaces its cache instead of
   re-querying.
+- A save names a note by id and carries the file hash it was read from. A
+  different hash on disk is `SaveConflict` and the file is untouched; `force`
+  is the user's explicit overwrite. The reply echoes the editor's `token`, so
+  text typed while the save was in flight stays dirty.
 - `Waker::wake()` tells the UI there is work; `poll()` drains the queue. No
   polling loops, no sleeps, no timers other than the scheduler's.
 - The UI updates optimistically, then reconciles with the reply. A failed
@@ -97,16 +107,37 @@ changed, so an idle app draws nothing.
 
 - The list is `Evt::Notes`: id, title and tags, alphabetical by title. Bodies
   are never in the index: `Cmd::OpenNote` names an id, the worker looks up the
-  path and reads the Markdown file. For writes, file first, index second still
-  holds.
-- Selecting a row only sets `State::wanted`; `poll` turns it into a command. A
-  body that arrives after the selection moved is dropped, not raced.
+  path and reads the Markdown file. `Evt::Opened` carries the file hash the
+  editor sends back on save. For writes, file first, index second still holds.
+- Handlers only mutate `State`. The editor queues `Action::Open` and
+  `Action::Save`; `poll` drains them into commands, so the view never talks to
+  the worker. A body that arrives after the selection moved is dropped, not
+  raced.
 - A missing vault, a failed reindex or a database inside the vault becomes
   `Load::Failed` with a dismissible message; the window still opens.
 - Headless runs (`--snap`, `--scene`, the headless tests) skip `setup` entirely,
   so a snapshot never reads a real vault and `xtask snap` stays deterministic.
   The integration tests own a `Session` directly and drive `pump()` against a
   temp vault.
+
+### The editor
+
+The detail pane edits the Markdown file itself, frontmatter excluded, so the
+`# Title` line is the rename control and there is no second preview mode.
+
+- `Draft` holds the `TextEdit`, the base hash, the token and two clocks. An
+  edit bumps the token; a save records the token it wrote. Dirty is
+  `token > acked`, so a save that lands after more typing cannot mark newer text
+  clean.
+- Autosave is `poll`-driven: 700 ms after the last keystroke, or 5 s into a
+  continuous run. `State::next_wake` tells `poll` when to sleep until; a clean or
+  blocked draft schedules no wake, so an idle app stays idle.
+- A save with a stale base hash becomes a conflict banner with Reload and
+  Overwrite; autosave stops until the user chooses. A failed save keeps the
+  draft and offers Try again.
+- Selecting another note while dirty queues the open behind the save. `⌘S` and
+  the Save button mean "write now"; `on_close` and `on_quit` flush a dirty draft
+  and wait up to 750 ms for the file.
 
 ## Time
 

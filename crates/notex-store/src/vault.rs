@@ -243,6 +243,23 @@ pub fn content_hash(bytes: &[u8]) -> u64 {
 
 /// Write a file so that readers see the old or the new contents, never a partial
 /// write: temp file in the same directory, fsync, rename.
+/// Replace a note's body, keeping its frontmatter.
+///
+/// An editor draft is a body, not a file. Writing it with [`write_atomic`]
+/// would drop `id`, tags and every key this app does not understand — and the
+/// next read would adopt the file under a new id. Frontmatter is the note's
+/// identity, so a save goes around the body and never replaces it.
+pub fn write_body(path: &Path, body: &str) -> Result<(), VaultError> {
+    let source = fs::read_to_string(path)?;
+    let (frontmatter, _) = parse_note_source(&source)?;
+    write_atomic(path, &frontmatter.render(body))
+}
+
+/// The content hash of a file as it is on disk, for change detection.
+pub fn file_hash(path: &Path) -> Result<u64, VaultError> {
+    Ok(content_hash(&fs::read(path)?))
+}
+
 pub fn write_atomic(path: &Path, contents: &str) -> Result<(), VaultError> {
     let parent = path.parent().ok_or_else(|| {
         VaultError::Io(std::io::Error::new(
@@ -319,6 +336,44 @@ Body text stays as written.
         let (again, body_again) = parse_note_source(&rendered).unwrap();
         assert_eq!(again, frontmatter);
         assert_eq!(body_again, body);
+    }
+
+    #[test]
+    fn writing_a_body_keeps_the_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weekly.md");
+        fs::write(
+            &path,
+            "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntags: [work, review]\ncssclasses: wide\n---\n# Weekly\n\nold\n",
+        )
+        .unwrap();
+
+        write_body(&path, "# Weekly\n\nnew body\n").unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        let (frontmatter, body) = parse_note_source(&saved).unwrap();
+        assert_eq!(frontmatter.get("id"), Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert_eq!(frontmatter.tags(), vec!["work", "review"]);
+        assert_eq!(
+            frontmatter.get("cssclasses"),
+            Some("wide"),
+            "keys this app does not know survive a save"
+        );
+        assert_eq!(body, "# Weekly\n\nnew body\n");
+
+        let note = read_note(&path).unwrap();
+        assert!(!note.adopted, "the id was already there");
+        assert_eq!(note.file.title, "Weekly");
+    }
+
+    #[test]
+    fn writing_a_body_to_a_file_without_frontmatter_adds_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bare.md");
+        fs::write(&path, "# Bare\n\nold\n").unwrap();
+
+        write_body(&path, "# Bare\n\nnew\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Bare\n\nnew\n");
     }
 
     #[test]

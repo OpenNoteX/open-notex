@@ -4,12 +4,11 @@
 //! mutate [`State`], and the next frame is the layout of that state.
 
 use rune::{Align, Cx, El, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
-use rune_kit::markdown::Markdown;
 use rune_kit::shell::{Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
 
 use crate::routes::{FOOTER, Route, SECTIONS};
-use crate::state::{Load, NoteBody, State};
+use crate::state::{Draft, DraftStatus, Load, NoteBody, State};
 use crate::theme;
 
 /// The window. `AppSpec::view`.
@@ -60,6 +59,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     }
     if ev.is_command(',') {
         s.route = Route::Settings;
+        return true;
+    }
+    if ev.is_command('s') {
+        s.request_save();
         return true;
     }
     false
@@ -287,7 +290,7 @@ fn detail_pane(s: &State, k: &Kit) -> El {
     }
 }
 
-/// The open note: its title, its tags and its Markdown, rendered from the file.
+/// The open note: its title, its tags, its status and the Markdown file itself.
 fn note_detail(s: &State, k: &Kit) -> El {
     let c = &k.c;
     let selected = s.selected.as_deref().unwrap_or_default();
@@ -320,33 +323,19 @@ fn note_detail(s: &State, k: &Kit) -> El {
                 .truncate(),
         );
     }
+    if let Some(draft) = &s.draft {
+        head = head.child(status_row(draft, k));
+    }
 
-    let body = match &s.body {
-        NoteBody::Ready(body) => col()
-            .key("detail-scroll")
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .px(32.0)
-            .pt(16.0)
-            .pb(32.0)
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .child(
-                Markdown::new(body_without_title(body))
-                    .selectable(true)
-                    .build(k)
-                    .key("detail-body")
-                    .w_full(),
-            ),
-        NoteBody::Loading => centered(
+    let body = match (&s.body, &s.draft) {
+        (_, Some(draft)) => editor(draft, k),
+        (NoteBody::Loading, _) => centered(
             "detail-loading",
             Spinner::new().size(16.0).build(k),
             "Reading the file…",
             k,
         ),
-        NoteBody::Failed(error) => centered(
+        (NoteBody::Failed(error), _) => centered(
             "detail-failed",
             icon(&crate::icons::WARNING, 22.0).color(c.danger.fg),
             error,
@@ -361,7 +350,7 @@ fn note_detail(s: &State, k: &Kit) -> El {
                 .wrap()
                 .max_w(300.0),
         ),
-        NoteBody::None => centered(
+        (NoteBody::Ready | NoteBody::None, _) => centered(
             "detail-none",
             icon(s.route.icon(), 20.0).color(c.icon_faint),
             "Select a note to read it.",
@@ -369,27 +358,165 @@ fn note_detail(s: &State, k: &Kit) -> El {
         ),
     };
 
-    col()
-        .key("detail")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .child(head)
-        .child(el().key("detail-rule").w_full().h(1.0).fill(c.border_weak))
+    let mut pane = col().key("detail").w_full().h_full().min_h(0.0).child(head);
+    if let Some(draft) = &s.draft {
+        let banner = draft
+            .conflict
+            .as_deref()
+            .map(|message| conflict_banner(message, k))
+            .or_else(|| {
+                draft
+                    .error
+                    .as_deref()
+                    .map(|message| error_banner(message, k))
+            });
+        if let Some(banner) = banner {
+            pane = pane.child(
+                col()
+                    .key("detail-banner")
+                    .w_full()
+                    .px(16.0)
+                    .py(8.0)
+                    .child(banner),
+            );
+        }
+    }
+    pane.child(el().key("detail-rule").w_full().h(1.0).fill(c.border_weak))
         .child(body)
 }
 
-/// A note's first `# Heading` is its title, and the header above the body already
-/// shows it. Drop that one heading so the title is not printed twice.
-fn body_without_title(body: &str) -> &str {
-    let body = body.trim_start_matches('\n');
-    let Some(rest) = body.strip_prefix("# ") else {
-        return body;
+/// "Saved · 2 minutes ago" and, while there is something to write, a Save button.
+fn status_row(draft: &Draft, k: &Kit) -> El {
+    let c = &k.c;
+    let (label, color) = match draft.status() {
+        DraftStatus::Conflict => ("Changed on disk", c.danger.fg),
+        DraftStatus::Failed => ("Not saved", c.danger.fg),
+        DraftStatus::Saving => ("Saving…", c.text_faint),
+        DraftStatus::Edited => ("Edited", c.text_muted),
+        DraftStatus::Saved => ("Saved", c.text_faint),
     };
-    match rest.find('\n') {
-        Some(end) => rest[end + 1..].trim_start_matches('\n'),
-        None => "",
+    let mut line = row().key("detail-status").w_full().gap(8.0).child(
+        text(label)
+            .key("detail-status-label")
+            .font(k.ty.text_xsmall)
+            .color(color),
+    );
+    // A conflicting save is blocked until the user picks a way out, so the
+    // button would do nothing; the banner's two buttons are the choice.
+    if (draft.is_dirty() || draft.error.is_some()) && draft.conflict.is_none() {
+        line = line.child(
+            Button::new("Save")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.request_save())
+                .build(k)
+                .key("save-note"),
+        );
     }
+    line
+}
+
+/// The editor: the file's Markdown, as it is on disk.
+fn editor(draft: &Draft, k: &Kit) -> El {
+    let c = &k.c;
+    let style = rune::TextStyle {
+        line_height: (13.0f32 * 1.35 * 2.0).round() / 2.0,
+        ..k.ty.ui
+    };
+    let field = rune::text_input(&draft.edit, style)
+        .key("detail-editor")
+        .w_full()
+        .color(c.text_base)
+        .caret(c.text_base, k.selection())
+        .placeholder("Start writing…".to_owned(), c.text_faint)
+        .spellcheck(true)
+        .on_edit(|s: &mut State| &mut s.draft.as_mut().unwrap().edit)
+        .on_input_change(|s: &mut State, _| s.draft_touched())
+        .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
+            if ev.is_command('s') {
+                s.request_save();
+                true
+            } else {
+                false
+            }
+        });
+
+    col()
+        .key("detail-scroll")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .px(28.0)
+        .pt(8.0)
+        .pb(32.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(field)
+}
+
+fn conflict_banner(message: &str, k: &Kit) -> El {
+    let c = &k.c;
+    row()
+        .key("detail-conflict")
+        .w_full()
+        .padding(10.0)
+        .gap(8.0)
+        .radius(8.0)
+        .fill(c.layer_02)
+        .child(icon(&crate::icons::WARNING, 16.0).color(c.danger.fg))
+        .child(
+            text(message.to_owned())
+                .key("conflict-message")
+                .font(k.ty.text_xsmall)
+                .color(c.text_base)
+                .wrap()
+                .grow(1.0),
+        )
+        .child(
+            Button::new("Reload")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.request_reload())
+                .build(k)
+                .key("conflict-reload"),
+        )
+        .child(
+            Button::new("Overwrite")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.request_overwrite())
+                .build(k)
+                .key("conflict-overwrite"),
+        )
+}
+
+fn error_banner(message: &str, k: &Kit) -> El {
+    let c = &k.c;
+    row()
+        .key("detail-save-failed")
+        .w_full()
+        .padding(10.0)
+        .gap(8.0)
+        .radius(8.0)
+        .fill(c.layer_02)
+        .child(icon(&crate::icons::WARNING, 16.0).color(c.danger.fg))
+        .child(
+            text(message.to_owned())
+                .key("save-error")
+                .font(k.ty.text_xsmall)
+                .color(c.text_base)
+                .wrap()
+                .grow(1.0),
+        )
+        .child(
+            Button::new("Try again")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.request_save())
+                .build(k)
+                .key("save-retry"),
+        )
 }
 
 /// A centered detail-pane message with one glyph and one line.
@@ -563,24 +690,4 @@ fn setting_row(k: &Kit, title: &str, value: &str) -> El {
                 .color(c.text_muted)
                 .truncate(),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::body_without_title;
-
-    #[test]
-    fn only_a_leading_title_heading_is_dropped() {
-        assert_eq!(body_without_title("# Title\n\nBody"), "Body");
-        assert_eq!(body_without_title("\n# Title\nBody"), "Body");
-        assert_eq!(body_without_title("# Only a title"), "");
-        assert_eq!(
-            body_without_title("Body\n# not a title"),
-            "Body\n# not a title"
-        );
-        assert_eq!(
-            body_without_title("## Subtitle\n\nBody"),
-            "## Subtitle\n\nBody"
-        );
-    }
 }

@@ -307,25 +307,122 @@ fn the_notes_list_shows_a_row_per_note_and_selects_on_press() {
     assert!(rt.find("detail-hint").is_none(), "the empty state is gone");
 }
 
+fn open_note(rt: &mut Runtime<State>) {
+    click(rt, "list-note-01A");
+    rt.state.show_body("01A", "# Apple\n\nA crisp note.\n", 7);
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+}
+
 #[test]
-fn an_open_note_renders_its_markdown_in_the_detail_pane() {
+fn an_open_note_shows_the_file_in_the_editor() {
     let mut state = notes_state();
-    state.selected = Some("01A".to_owned());
-    state.body = NoteBody::Ready(
-        "# Apple\n\nA crisp note with a [link](https://example.com).\n\n- one\n- two\n".to_owned(),
+    state.select_note("01A");
+    state.show_body(
+        "01A",
+        "# Apple\n\nA crisp note with a [link](https://example.com).\n",
+        7,
     );
     let rt = runtime(state);
 
     assert_eq!(label_of(&rt, "detail-title"), "Apple");
     assert_eq!(label_of(&rt, "detail-tags"), "fruit");
-    assert!(rt.find("detail-body").is_some(), "Markdown is mounted");
-    let shown: String = rt
-        .elements()
-        .into_iter()
-        .filter_map(|element| element.text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(shown.contains("A crisp note with a link."), "{shown}");
+    assert!(rt.find("detail-editor").is_some(), "the editor is mounted");
+    assert_eq!(label_of(&rt, "detail-status-label"), "Saved");
+    assert!(rt.find("save-note").is_none(), "nothing to save yet");
+    let text = &rt.state.draft.as_ref().unwrap().edit.text;
+    assert!(text.starts_with("# Apple\n\nA crisp note"), "{text}");
+}
+
+#[test]
+fn typing_marks_the_note_edited_and_offers_save() {
+    let mut rt = runtime(notes_state());
+    open_note(&mut rt);
+
+    click(&mut rt, "detail-editor");
+    rt.paste(" and more");
+    rt.frame(1.0 / 60.0);
+
+    assert!(rt.state.draft.as_ref().unwrap().is_dirty());
+    assert_eq!(label_of(&rt, "detail-status-label"), "Edited");
+    assert!(rt.find("save-note").is_some(), "an explicit save appears");
+
+    click(&mut rt, "save-note");
+    let action = rt.state.take_action().unwrap();
+    assert!(matches!(action, notex_ui::Action::Save(request) if request.body.contains("and more")));
+}
+
+#[test]
+fn command_s_asks_for_a_save_while_editing() {
+    let mut rt = runtime(notes_state());
+    open_note(&mut rt);
+    click(&mut rt, "detail-editor");
+    rt.paste("!");
+    rt.frame(1.0 / 60.0);
+
+    rt.key(KeyEvent {
+        key: Key::Command('s'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1.0 / 60.0);
+
+    let action = rt.state.take_action();
+    assert!(
+        matches!(action, Some(notex_ui::Action::Save(_))),
+        "⌘S asks for a save now, got {action:?}"
+    );
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(label_of(&rt, "detail-status-label"), "Saving…");
+}
+
+#[test]
+fn a_conflict_explains_itself_and_offers_two_ways_out() {
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nMine.\n", 7);
+    state.draft_touched();
+    state.save_conflict("01A", "This file changed on disk since you opened it.");
+    let mut rt = runtime(state);
+
+    assert_eq!(label_of(&rt, "detail-status-label"), "Changed on disk");
+    assert!(rt.find("detail-conflict").is_some());
+    assert!(
+        rt.find("save-note").is_none(),
+        "a blocked save has no button"
+    );
+    assert!(
+        label_of(&rt, "conflict-message").contains("changed on disk"),
+        "the banner says what happened"
+    );
+
+    click(&mut rt, "conflict-overwrite");
+    let action = rt.state.take_action().unwrap();
+    assert!(
+        matches!(action, notex_ui::Action::Save(request) if request.force),
+        "overwrite writes anyway"
+    );
+}
+
+#[test]
+fn a_failed_save_keeps_the_draft_and_the_text() {
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nMine.\n", 7);
+    state.draft_touched();
+    state.save_failed("01A", "io: the disk is full");
+    let rt = runtime(state);
+
+    assert_eq!(label_of(&rt, "detail-status-label"), "Not saved");
+    assert!(rt.find("detail-save-failed").is_some());
+    assert_eq!(label_of(&rt, "save-error"), "io: the disk is full");
+    assert_eq!(
+        rt.state.draft.as_ref().unwrap().edit.text,
+        "# Apple\n\nMine.\n"
+    );
 }
 
 #[test]
@@ -344,9 +441,11 @@ fn a_failed_body_explains_itself_without_losing_the_list() {
 fn a_note_that_left_the_list_clears_the_selection() {
     let mut state = notes_state();
     state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nA crisp note.\n", 7);
     state.set_notes(vec![NoteRow::new("01B", "Banana", &[])]);
 
     assert_eq!(state.selected, None);
     assert_eq!(state.body, NoteBody::None);
-    assert_eq!(state.wanted, None, "the stale read is dropped too");
+    assert!(state.draft.is_none(), "the editor goes with it");
+    assert_eq!(state.pending_open, None, "the stale read is dropped too");
 }
