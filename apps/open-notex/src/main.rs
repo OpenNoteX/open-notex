@@ -7,7 +7,7 @@
 //! and arrive through `rune::extra_args`.
 
 use notex_ui::{MIN_SIZE, SCENES, SIZE, State, TITLE, on_key, view};
-use open_notex::{poll, setup};
+use open_notex::{flush, poll, setup};
 use rune::{App, AppSpec, Chrome};
 
 fn main() {
@@ -28,5 +28,9 @@ fn main() {
         ..AppSpec::new(TITLE, SIZE, State::from_args, view)
     };
 
-    App::new(spec).chrome(chrome).run();
+    App::new(spec)
+        .chrome(chrome)
+        .on_close(flush)
+        .on_quit(flush)
+        .run();
 }

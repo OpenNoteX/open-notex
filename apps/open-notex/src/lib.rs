@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use notex_store::worker::{self, Cmd, Evt, Notify, StoreHandle, Worker};
 use notex_store::{StoreError, db};
-use notex_ui::{Load, NoteRow, State};
+use notex_ui::{Action, DraftStatus, Load, NoteRow, State};
 use rune::{Tx, Waker};
 use thiserror::Error;
 
@@ -129,25 +129,52 @@ pub fn setup(state: &mut State, waker: Waker) {
     }
 }
 
-/// `AppSpec::poll`: drains the worker's events into state. Returns whether the
-/// view changed, so an idle app draws nothing.
-pub fn poll(state: &mut State, _dt: f64, _tx: &mut Tx) -> bool {
-    SESSION.with(|slot| match slot.borrow().as_ref() {
-        Some(session) => pump(state, session.handle()),
-        None => false,
-    })
+/// `AppSpec::poll`: advances the editor's clocks, tells Rune when to wake for an
+/// autosave, and drains the worker. Returns whether the view changed, so an idle
+/// app draws nothing.
+pub fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
+    let mut changed = state.tick(now);
+    // A dirty draft that is waiting out its idle delay needs one wake to save
+    // it; a clean or blocked one schedules nothing, so the app can sleep.
+    if let Some(wait) = state.next_wake() {
+        tx.wake_after(std::time::Duration::from_secs_f64(wait.max(0.001)));
+    }
+    SESSION.with(|slot| {
+        if let Some(session) = slot.borrow().as_ref() {
+            changed |= pump(state, session.handle());
+        }
+    });
+    changed
 }
 
-/// Send the reads the list asked for and apply every event the worker queued.
-/// Split out from [`poll`] so tests can drive a session they own.
+/// Send the commands the editor and the list asked for, then apply every event
+/// the worker queued. Split out from [`poll`] so tests can drive a session they
+/// own.
 pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
     let mut changed = false;
 
-    while let Some(id) = state.take_wanted() {
-        if handle.send(Cmd::OpenNote { id }).is_err() {
-            state.load = Load::Failed("The store is no longer running.".to_owned());
-            changed = true;
+    while let Some(action) = state.take_action() {
+        match action {
+            Action::Open(id) => {
+                if handle.send(Cmd::OpenNote { id: id.clone() }).is_err() {
+                    state.fail_body(&id, "The store is no longer running.".to_owned());
+                }
+            }
+            Action::Save(request) => {
+                let id = request.id.clone();
+                let sent = handle.send(Cmd::SaveNote {
+                    id: id.clone(),
+                    body: request.body,
+                    base_hash: request.base_hash,
+                    token: request.token,
+                    force: request.force,
+                });
+                if sent.is_err() {
+                    state.save_failed(&id, "The store is no longer running.");
+                }
+            }
         }
+        changed = true;
     }
 
     for event in handle.drain() {
@@ -158,8 +185,8 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
 
 fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
     match event {
-        // Pong is a health check; a save is echoed to whoever asked for it.
-        Evt::Pong | Evt::Saved { .. } => false,
+        // Pong is a health check.
+        Evt::Pong => false,
         // The index is fresh: ask for the list it now backs.
         Evt::Indexed { .. } => {
             let _ = handle.send(Cmd::ListNotes);
@@ -179,12 +206,30 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
             state.load = Load::Ready;
             true
         }
-        Evt::Opened { id, body } => {
-            state.show_body(&id, body);
+        Evt::Opened { id, body, hash } => {
+            state.show_body(&id, body, hash);
             true
         }
         Evt::OpenFailed { id, err } => {
             state.fail_body(&id, err);
+            true
+        }
+        Evt::Saved {
+            id,
+            token,
+            hash,
+            title,
+            tags,
+        } => {
+            state.saved(&id, token, hash, title, tags);
+            true
+        }
+        Evt::SaveConflict { id, .. } => {
+            state.save_conflict(&id, "This file changed on disk since you opened it.");
+            true
+        }
+        Evt::SaveFailed { id, err, .. } => {
+            state.save_failed(&id, err);
             true
         }
         Evt::Failed { op, err } => {
@@ -192,6 +237,33 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
             true
         }
     }
+}
+
+/// Close and quit hook: write a dirty draft and wait for the file, so closing
+/// the window never drops the last edit. Bounded, so a dead worker cannot hang
+/// the quit.
+pub fn flush(state: &mut State, _tx: &mut Tx) {
+    state.request_save();
+    SESSION.with(|slot| {
+        let session = slot.borrow();
+        let Some(session) = session.as_ref() else {
+            return;
+        };
+        let handle = session.handle();
+        let mut waited = 0_u64;
+        loop {
+            pump(state, handle);
+            let saving = state
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.status() == DraftStatus::Saving);
+            if !saving || waited >= 750 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 5;
+        }
+    });
 }
 
 /// The database lives with the app's other data, never in the vault (rule 8).

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use notex_core::ItemId;
 use notex_store::{db, index, vault};
@@ -122,7 +122,7 @@ fn seed(args: &[String]) -> Result<(), String> {
 
 fn bench(args: &[String]) -> Result<(), String> {
     let db_path = PathBuf::from(value(args, "db").ok_or("--db is required")?);
-    let conn = db::open(&db_path).map_err(|error| error.to_string())?;
+    let mut conn = db::open(&db_path).map_err(|error| error.to_string())?;
 
     let started = Instant::now();
     let count = index::note_count(&conn).map_err(|error| error.to_string())?;
@@ -147,6 +147,52 @@ fn bench(args: &[String]) -> Result<(), String> {
             "search {query:?}: {} hits in {} µs",
             hits.len(),
             started.elapsed().as_micros()
+        );
+    }
+
+    // A save: hash the file, rewrite the body, read it back, index it. That is
+    // exactly the worker's `SaveNote`, so this is the latency an autosave adds
+    // to the frame that requested it.
+    if let Some(first) = listed.first()
+        && let Some(path) = index::note_path(&conn, &first.id).map_err(|error| error.to_string())?
+    {
+        let original = vault::read_note(&path).map_err(|error| error.to_string())?;
+        let mut samples: Vec<Duration> = Vec::with_capacity(50);
+        let mut writes: Vec<Duration> = Vec::with_capacity(50);
+        let mut indexes: Vec<Duration> = Vec::with_capacity(50);
+        for i in 0..50 {
+            let body = format!(
+                "{}\n<!-- save benchmark {i} -->\n",
+                original.body.trim_end()
+            );
+            let started = Instant::now();
+            vault::file_hash(&path).map_err(|error| error.to_string())?;
+            vault::write_body(&path, &body).map_err(|error| error.to_string())?;
+            let note = vault::read_note(&path).map_err(|error| error.to_string())?;
+            writes.push(started.elapsed());
+            let started = Instant::now();
+            index::upsert_note(&mut conn, &note.file, &note.body, now_ms(), "bench")
+                .map_err(|error| error.to_string())?;
+            indexes.push(started.elapsed());
+            samples.push(writes[i] + indexes[i]);
+        }
+        // Leave the fixture as it was found.
+        vault::write_body(&path, &original.body).map_err(|error| error.to_string())?;
+        let note = vault::read_note(&path).map_err(|error| error.to_string())?;
+        index::upsert_note(&mut conn, &note.file, &note.body, now_ms(), "bench")
+            .map_err(|error| error.to_string())?;
+
+        for column in [&mut samples, &mut writes, &mut indexes] {
+            column.sort();
+        }
+        let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
+        println!(
+            "save: median {:.2} ms, p95 {:.2} ms (file {:.2}, index {:.2}) over {} saves",
+            ms(&samples[samples.len() / 2]),
+            ms(&samples[samples.len() * 95 / 100]),
+            ms(&writes[writes.len() / 2]),
+            ms(&indexes[indexes.len() / 2]),
+            samples.len()
         );
     }
 

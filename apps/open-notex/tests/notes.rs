@@ -2,8 +2,8 @@
 //! element tree. Only the GPU window is missing.
 //!
 //! These cover the wiring `poll` does: index the vault, list the notes, read a
-//! body from its file when the list selects it, and show a readable failure when
-//! the vault or the database path is wrong.
+//! body from its file when the list selects it, save an edit back to the file,
+//! and show a readable failure when the vault or the database path is wrong.
 
 use std::fs;
 use std::time::{Duration, Instant};
@@ -36,10 +36,20 @@ fn label_of(rt: &Runtime<State>, key: &str) -> String {
 }
 
 fn click(rt: &mut Runtime<State>, key: &str) {
+    // A new banner slides the rule and the editor down; a click on its final
+    // box before the motion settles would land on the element above it.
+    settle_layout(rt);
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
+}
+
+/// Draw a second of frames so layout motion finishes.
+fn settle_layout(rt: &mut Runtime<State>) {
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
 }
 
 /// Pump the worker until `done` holds, drawing a frame after each change.
@@ -61,10 +71,24 @@ fn settle(rt: &mut Runtime<State>, session: &Session, what: &str, done: impl Fn(
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!(
-        "{what} never finished: load={:?} notes={}",
+        "{what} never finished: load={:?} notes={} body={:?} draft={:?}",
         rt.state.load,
-        rt.state.notes.len()
+        rt.state.notes.len(),
+        rt.state.body,
+        rt.state.draft.as_ref().map(|draft| (
+            draft.is_dirty(),
+            draft.status(),
+            draft.conflict.clone(),
+            draft.error.clone()
+        ))
     );
+}
+
+/// Advance the editor's clock as `poll` would, so a pending autosave falls due.
+fn pass_time(rt: &mut Runtime<State>, seconds: f64) {
+    rt.state.tick(seconds);
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
 }
 
 fn all_text(rt: &Runtime<State>) -> String {
@@ -92,19 +116,34 @@ fn temp_vault() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, vault)
 }
 
-#[test]
-fn a_vault_lists_its_notes_and_opens_a_body_from_the_file() {
+/// Index the temp vault and return the window, its session and the vault root.
+fn open_vault() -> (
+    Runtime<State>,
+    Session,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
     let (dir, vault) = temp_vault();
     let db = dir.path().join("notex.db");
-
     let mut state = State::with_vault(vault.display().to_string());
     state.route = Route::Notes;
     let session = start(&mut state, &vault, &db, Quiet).expect("the store starts");
     let mut rt = runtime(state);
-
     settle(&mut rt, &session, "the note list", |state| {
         state.load == Load::Ready && state.notes.len() == 2
     });
+    (rt, session, dir, vault)
+}
+
+fn open_note(rt: &mut Runtime<State>, session: &Session, index: usize) {
+    let id = rt.state.notes[index].id.clone();
+    click(rt, &format!("list-note-{id}"));
+    settle(rt, session, "the note body", |state| state.draft.is_some());
+}
+
+#[test]
+fn a_vault_lists_its_notes_and_opens_a_body_from_the_file() {
+    let (mut rt, session, _dir, _vault) = open_vault();
 
     // Alphabetical, with the frontmatter tags as the second line.
     let titles: Vec<&str> = rt.state.notes.iter().map(|n| n.title.as_str()).collect();
@@ -126,39 +165,119 @@ fn a_vault_lists_its_notes_and_opens_a_body_from_the_file() {
     assert!(rt.find("detail-loading").is_some(), "a body shows progress");
 
     settle(&mut rt, &session, "the note body", |state| {
-        matches!(state.body, NoteBody::Ready(_))
+        state.draft.is_some()
     });
 
-    assert!(rt.find("detail-body").is_some(), "Markdown is rendered");
+    assert!(rt.find("detail-editor").is_some(), "the file is editable");
     assert_eq!(label_of(&rt, "detail-title"), "Weekly review");
-    let text = all_text(&rt);
-    assert!(text.contains("The launch plan is written down."), "{text}");
-    assert!(!text.contains("tags:"), "frontmatter is not shown");
+    let editor = &rt.state.draft.as_ref().unwrap().edit.text;
+    assert!(
+        editor.contains("The launch plan is written down."),
+        "the editor holds the file: {editor}"
+    );
+    assert!(!editor.contains("tags:"), "frontmatter is not shown");
 }
 
 #[test]
 fn pressing_the_selected_row_again_does_not_re_read_the_file() {
-    let (dir, vault) = temp_vault();
-    let db = dir.path().join("notex.db");
+    let (mut rt, session, _dir, _vault) = open_vault();
+    open_note(&mut rt, &session, 0);
 
-    let mut state = State::with_vault(vault.display().to_string());
-    state.route = Route::Notes;
-    let session = start(&mut state, &vault, &db, Quiet).expect("the store starts");
-    let mut rt = runtime(state);
-    settle(&mut rt, &session, "the note list", |state| {
-        state.notes.len() == 2
-    });
-
+    let before = rt.state.draft.as_ref().unwrap().edit.text.clone();
     let id = rt.state.notes[0].id.clone();
-    let key = format!("list-note-{id}");
-    click(&mut rt, &key);
-    settle(&mut rt, &session, "the note body", |state| {
-        matches!(state.body, NoteBody::Ready(_))
+    click(&mut rt, &format!("list-note-{id}"));
+
+    assert_eq!(rt.state.body, NoteBody::Ready);
+    assert_eq!(rt.state.draft.as_ref().unwrap().edit.text, before);
+    assert!(
+        rt.state.take_action().is_none(),
+        "no second open went to the worker"
+    );
+}
+
+#[test]
+fn an_edit_is_written_to_the_markdown_file_with_its_frontmatter() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+    assert_eq!(
+        rt.state.selected.as_deref(),
+        Some(rt.state.notes[0].id.as_str())
+    );
+
+    let edited = "# Grocery list\n\n- milk\n- coffee\n- bread\n";
+    rt.state.draft.as_mut().unwrap().edit.replace_text(edited);
+    rt.state.draft_touched();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(label_of(&rt, "detail-status-label"), "Edited");
+
+    // Past the autosave delay, `poll` would ask for a save; the test does it.
+    pass_time(&mut rt, 1.0);
+    settle(&mut rt, &session, "the autosave", |state| {
+        state.draft.as_ref().is_some_and(|draft| !draft.is_dirty())
     });
 
-    let before = rt.state.body.clone();
-    click(&mut rt, &key);
-    assert_eq!(rt.state.body, before, "the body did not reload");
+    let on_disk = fs::read_to_string(vault.join("grocery-list.md")).unwrap();
+    assert!(
+        on_disk.contains("- bread"),
+        "the file has the edit: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("tags: [errands]"),
+        "the frontmatter survived the save: {on_disk}"
+    );
+
+    // File first, index second: the row and its tags came from the read-back.
+    assert_eq!(rt.state.notes[0].title, "Grocery list");
+    assert_eq!(rt.state.notes[0].tags, vec!["errands"]);
+    assert_eq!(label_of(&rt, "detail-status-label"), "Saved");
+}
+
+#[test]
+fn a_file_changed_under_the_editor_is_a_conflict_the_user_can_resolve() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+
+    // Another editor writes the file after ours was read.
+    let theirs = "---\ntags: [errands]\n---\n# Grocery list\n\n- milk\n- tea\n";
+    fs::write(vault.join("grocery-list.md"), theirs).unwrap();
+
+    rt.state
+        .draft
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text("# Grocery list\n\n- milk\n- coffee\n- bread\n");
+    rt.state.draft_touched();
+    pass_time(&mut rt, 1.0);
+    settle(&mut rt, &session, "the conflict", |state| {
+        state
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.conflict.is_some())
+    });
+
+    assert_eq!(label_of(&rt, "detail-status-label"), "Changed on disk");
+    assert!(rt.find("detail-conflict").is_some());
+    assert_eq!(
+        fs::read_to_string(vault.join("grocery-list.md")).unwrap(),
+        theirs,
+        "a refused save leaves the other edit alone"
+    );
+
+    // Overwrite is the explicit choice to write anyway.
+    click(&mut rt, "conflict-overwrite");
+    let saved = |state: &State| {
+        state.draft.as_ref().is_some_and(|draft| {
+            !draft.is_dirty() && draft.conflict.is_none() && draft.error.is_none()
+        })
+    };
+    pass_time(&mut rt, 0.1);
+    settle(&mut rt, &session, "the overwrite", saved);
+
+    let on_disk = fs::read_to_string(vault.join("grocery-list.md")).unwrap();
+    assert!(on_disk.contains("- bread"), "{on_disk}");
+    assert!(on_disk.contains("tags: [errands]"), "{on_disk}");
 }
 
 #[test]
