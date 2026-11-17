@@ -339,6 +339,81 @@ fn an_open_note_shows_the_file_in_the_editor() {
 }
 
 #[test]
+fn the_new_note_button_and_command_n_ask_for_a_note() {
+    let mut rt = runtime(notes_state());
+    assert!(rt.find("new-note").is_some(), "the list offers a new note");
+    click(&mut rt, "new-note");
+    assert_eq!(rt.state.take_action(), Some(notex_ui::Action::Create));
+
+    press(&mut rt, Key::Command('n'));
+    assert_eq!(rt.state.take_action(), Some(notex_ui::Action::Create));
+
+    // A route without a note list has nothing to add a note to.
+    let mut state = notes_state();
+    state.route = Route::Today;
+    let rt = runtime(state);
+    assert!(rt.find("new-note").is_none());
+}
+
+#[test]
+fn deleting_a_note_asks_before_it_moves_the_file() {
+    let mut rt = runtime(notes_state());
+    open_note(&mut rt);
+
+    click(&mut rt, "delete-note");
+    assert!(rt.find("delete-note-dialog").is_some(), "the dialog is up");
+    assert_eq!(rt.state.confirm_delete.as_deref(), Some("01A"));
+    assert!(
+        rt.state.take_action().is_none(),
+        "nothing happens before the answer"
+    );
+    let dialog_title = label_of(&rt, "delete-note-dialog");
+    assert_eq!(dialog_title, "Delete “Apple”?", "{dialog_title}");
+
+    click(&mut rt, "delete-cancel");
+    assert!(rt.find("delete-note-dialog").is_none(), "the dialog closes");
+    assert!(rt.state.confirm_delete.is_none());
+    assert!(rt.state.take_action().is_none());
+
+    click(&mut rt, "delete-note");
+    click(&mut rt, "delete-confirm");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(notex_ui::Action::Delete("01A".to_owned()))
+    );
+    assert!(rt.find("delete-note-dialog").is_none());
+}
+
+#[test]
+fn command_backspace_asks_to_delete_the_open_note() {
+    let mut rt = runtime(notes_state());
+    open_note(&mut rt);
+
+    rt.key(KeyEvent {
+        key: Key::Backspace,
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.confirm_delete.as_deref(), Some("01A"));
+}
+
+#[test]
+fn a_refused_create_is_explained_under_the_list_header() {
+    let mut state = notes_state();
+    state.action_error = Some("the vault is not open yet".to_owned());
+    let rt = runtime(state);
+
+    assert!(rt.find("list-action-error").is_some());
+    assert_eq!(
+        label_of(&rt, "list-action-error-text"),
+        "the vault is not open yet"
+    );
+}
+
+#[test]
 fn typing_marks_the_note_edited_and_offers_save() {
     let mut rt = runtime(notes_state());
     open_note(&mut rt);

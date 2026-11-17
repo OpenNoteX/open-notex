@@ -154,6 +154,10 @@ pub struct SaveRequest {
 pub enum Action {
     Save(SaveRequest),
     Open(String),
+    /// Make a new note in the vault.
+    Create,
+    /// Move a note's file to the trash and drop it from the list.
+    Delete(String),
 }
 
 pub struct State {
@@ -175,6 +179,14 @@ pub struct State {
     /// A row the user picked while the editor had unsaved text. Opened after the
     /// save lands, so typing is never thrown away.
     pub pending_open: Option<String>,
+    /// New note and delete also wait for a dirty draft, for the same reason: the
+    /// note being left must reach its file before the screen changes.
+    pending_new: bool,
+    pending_delete: Option<String>,
+    /// The note a confirmation dialog is asking about.
+    pub confirm_delete: Option<String>,
+    /// The last create or delete that a worker refused, for the list pane.
+    pub action_error: Option<String>,
     /// `⌘S` or the Save button asked for a save now.
     save_requested: bool,
     /// The last `poll` clock, for `tick`. Seconds since the app started.
@@ -201,6 +213,10 @@ impl State {
             body: NoteBody::None,
             draft: None,
             pending_open: None,
+            pending_new: false,
+            pending_delete: None,
+            confirm_delete: None,
+            action_error: None,
             save_requested: false,
             clock: 0.0,
             vault: vault.into(),
@@ -211,6 +227,15 @@ impl State {
     /// Replace the list. A selection whose note disappeared (deleted or renamed
     /// elsewhere) is cleared rather than left pointing at nothing.
     pub fn set_notes(&mut self, notes: Vec<NoteRow>) {
+        // A confirmation for a note that is not in the list has nothing to ask
+        // about: the row went away while the dialog was open.
+        if self
+            .confirm_delete
+            .as_ref()
+            .is_some_and(|id| !notes.iter().any(|note| &note.id == id))
+        {
+            self.confirm_delete = None;
+        }
         if let Some(selected) = &self.selected
             && !notes.iter().any(|note| &note.id == selected)
         {
@@ -298,6 +323,93 @@ impl State {
         }
     }
 
+    /// Drop everything queued behind a save. Called when the window closes: the
+    /// note being left stays open, and nothing fires after the screen is gone.
+    pub fn cancel_pending(&mut self) {
+        self.pending_open = None;
+        self.pending_new = false;
+        self.pending_delete = None;
+        self.confirm_delete = None;
+    }
+
+    /// New note (`⌘N` and the list's button). A dirty draft is written first, so
+    /// the note being left is never abandoned.
+    pub fn request_create(&mut self) {
+        self.action_error = None;
+        self.pending_new = true;
+        if self.draft.as_ref().is_some_and(Draft::is_dirty) {
+            self.request_save();
+        }
+    }
+
+    /// Ask before deleting the selected note. Nothing happens until
+    /// [`State::confirm_delete`].
+    pub fn request_delete(&mut self) {
+        if let Some(id) = &self.selected {
+            self.action_error = None;
+            self.confirm_delete = Some(id.clone());
+        }
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.confirm_delete = None;
+    }
+
+    /// The user said yes. A dirty draft is written first; if that save fails the
+    /// delete is dropped rather than throwing the text away.
+    pub fn confirm_delete(&mut self) {
+        let Some(id) = self.confirm_delete.take() else {
+            return;
+        };
+        self.action_error = None;
+        self.pending_delete = Some(id.clone());
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.id == id && draft.is_dirty())
+        {
+            self.request_save();
+        }
+    }
+
+    /// A new note arrived from the worker: show it, ready to type into.
+    pub fn created(&mut self, id: &str, body: String, hash: u64) {
+        self.pending_new = false;
+        self.action_error = None;
+        self.selected = Some(id.to_owned());
+        self.show_body(id, body, hash);
+    }
+
+    /// A note is gone from the vault: its row, and the editor if it was open.
+    pub fn deleted(&mut self, id: &str) {
+        self.pending_delete = None;
+        if self.confirm_delete.as_deref() == Some(id) {
+            self.confirm_delete = None;
+        }
+        if self.pending_open.as_deref() == Some(id) {
+            self.pending_open = None;
+        }
+        self.notes.retain(|note| note.id != id);
+        if self.selected.as_deref() == Some(id) {
+            self.selected = None;
+            self.body = NoteBody::None;
+            self.draft = None;
+        }
+        self.action_error = None;
+    }
+
+    pub fn create_failed(&mut self, error: impl Into<String>) {
+        self.pending_new = false;
+        self.action_error = Some(error.into());
+    }
+
+    pub fn delete_failed(&mut self, id: &str, error: impl Into<String>) {
+        if self.pending_delete.as_deref() == Some(id) {
+            self.pending_delete = None;
+        }
+        self.action_error = Some(error.into());
+    }
+
     /// A save landed. `token` is the edit revision that was written, so text
     /// typed while the save was in flight stays dirty.
     pub fn saved(&mut self, id: &str, token: u64, hash: u64, title: String, tags: Vec<String>) {
@@ -327,6 +439,9 @@ impl State {
             draft.saving = false;
             draft.conflict = Some(message.into());
         }
+        // A delete behind a refused save is dropped: the file on disk is not
+        // ours to remove.
+        self.pending_delete = None;
     }
 
     pub fn save_failed(&mut self, id: &str, error: impl Into<String>) {
@@ -336,6 +451,8 @@ impl State {
             draft.saving = false;
             draft.error = Some(error.into());
         }
+        self.pending_delete = None;
+        self.pending_new = false;
     }
 
     /// Advance the editor's clocks. `now` is `poll`'s clock: seconds since the
@@ -392,6 +509,21 @@ impl State {
             }
         }
         self.save_requested = false;
+
+        let clean = self.draft.as_ref().is_none_or(|draft| !draft.is_dirty());
+        if clean && let Some(id) = self.pending_delete.take() {
+            if self.selected.as_deref() == Some(&id) {
+                self.selected = None;
+                self.body = NoteBody::None;
+                self.draft = None;
+            }
+            self.pending_open = None;
+            return Some(Action::Delete(id));
+        }
+        if clean && std::mem::take(&mut self.pending_new) {
+            self.pending_open = None;
+            return Some(Action::Create);
+        }
 
         if self.draft.as_ref().is_none_or(|draft| !draft.is_dirty())
             && let Some(id) = self.pending_open.take()
@@ -597,6 +729,141 @@ mod tests {
         open_alpha(&mut state);
         state.select_note("01B");
         assert_eq!(state.take_action(), Some(Action::Open("01B".to_owned())));
+    }
+
+    #[test]
+    fn a_new_note_waits_for_the_draft_being_left() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+
+        state.request_create();
+        // The save first, so the note being left reaches its file.
+        let first = state.take_action();
+        assert!(matches!(first, Some(Action::Save(_))), "{first:?}");
+        assert_eq!(state.take_action(), None, "the new note waits");
+
+        state.saved("01A", 1, 12, "Alpha".to_owned(), vec!["work".to_owned()]);
+        assert_eq!(state.take_action(), Some(Action::Create));
+    }
+
+    #[test]
+    fn a_new_note_on_a_clean_editor_is_asked_for_at_once() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+
+        state.request_create();
+        assert_eq!(state.take_action(), Some(Action::Create));
+    }
+
+    #[test]
+    fn creating_shows_the_new_note_ready_to_type() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+
+        state.created("01C", "# Untitled\n".to_owned(), 5);
+        assert_eq!(state.selected.as_deref(), Some("01C"));
+        assert_eq!(state.body, NoteBody::Ready);
+        let draft = state.draft.as_ref().unwrap();
+        assert_eq!(draft.id, "01C");
+        assert_eq!(draft.edit.text, "# Untitled\n");
+        assert!(!draft.is_dirty(), "a fresh note has nothing to save");
+    }
+
+    #[test]
+    fn a_delete_asks_first_and_then_removes_the_note() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+
+        state.request_delete();
+        assert_eq!(state.confirm_delete.as_deref(), Some("01A"));
+        assert_eq!(
+            state.take_action(),
+            None,
+            "nothing is deleted before the answer"
+        );
+
+        state.cancel_delete();
+        assert!(state.confirm_delete.is_none());
+        assert_eq!(state.take_action(), None, "a cancelled delete does nothing");
+
+        state.request_delete();
+        state.confirm_delete();
+        assert_eq!(state.take_action(), Some(Action::Delete("01A".to_owned())));
+        assert!(state.selected.is_none(), "the editor is closed with it");
+        assert!(state.draft.is_none());
+
+        state.deleted("01A");
+        let ids: Vec<&str> = state.notes.iter().map(|note| note.id.as_str()).collect();
+        assert_eq!(ids, vec!["01B"]);
+    }
+
+    #[test]
+    fn a_delete_of_a_dirty_note_saves_it_before_it_goes() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+
+        state.request_delete();
+        state.confirm_delete();
+        let action = state.take_action();
+        assert!(
+            matches!(action, Some(Action::Save(_))),
+            "the text is saved first: {action:?}"
+        );
+        assert_eq!(state.take_action(), None, "the delete waits for the save");
+
+        state.saved("01A", 1, 12, "Alpha".to_owned(), vec!["work".to_owned()]);
+        assert_eq!(state.take_action(), Some(Action::Delete("01A".to_owned())));
+    }
+
+    #[test]
+    fn a_delete_dialog_closes_when_its_note_leaves_the_list() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        state.request_delete();
+        assert_eq!(state.confirm_delete.as_deref(), Some("01A"));
+
+        state.set_notes(vec![NoteRow::new("01B", "Beta", &[])]);
+        assert!(
+            state.confirm_delete.is_none(),
+            "the note is gone, so is the question"
+        );
+    }
+
+    #[test]
+    fn a_delete_is_dropped_when_the_save_it_waited_for_fails() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+        state.request_delete();
+        state.confirm_delete();
+        assert!(matches!(state.take_action(), Some(Action::Save(_))));
+
+        state.save_failed("01A", "io: the disk is full");
+        assert_eq!(
+            state.take_action(),
+            None,
+            "the file is still the one on disk"
+        );
+        assert_eq!(state.draft.as_ref().unwrap().status(), DraftStatus::Failed);
+    }
+
+    #[test]
+    fn a_refused_create_is_explained_in_the_list() {
+        let mut state = state_with_two_notes();
+        state.request_create();
+        assert_eq!(state.take_action(), Some(Action::Create));
+
+        state.create_failed("the vault is not open yet");
+        assert_eq!(
+            state.action_error.as_deref(),
+            Some("the vault is not open yet")
+        );
+
+        // Asking again clears the old message.
+        state.request_create();
+        assert!(state.action_error.is_none());
     }
 
     #[test]

@@ -71,3 +71,14 @@ icon!(
     "notex-warning",
     r#"<path d="M8 2.4L14.4 13.4H1.6Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 6.2V9.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/>"#
 );
+// Not routes: the list's new-note button and the detail pane's delete button.
+icon!(
+    PLUS,
+    "notex-plus",
+    r#"<path d="M8 3.4V12.6M3.4 8H12.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#
+);
+icon!(
+    TRASH,
+    "notex-trash",
+    r#"<path d="M3.2 4.8H12.8M6.3 4.8V3.4H9.7V4.8M4.8 4.8L5.4 12.6H10.6L11.2 4.8M6.8 7.2V10.4M9.2 7.2V10.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
+);

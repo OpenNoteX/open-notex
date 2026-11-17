@@ -234,6 +234,109 @@ fn an_edit_is_written_to_the_markdown_file_with_its_frontmatter() {
 }
 
 #[test]
+fn a_new_note_is_a_real_markdown_file_in_the_vault() {
+    let (mut rt, session, _dir, vault) = open_vault();
+
+    click(&mut rt, "new-note");
+    settle(&mut rt, &session, "the new note", |state| {
+        state
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.edit.text.starts_with("# Untitled"))
+    });
+
+    let path = vault.join("untitled.md");
+    let source = fs::read_to_string(&path).expect("the file exists before the list does");
+    assert!(source.contains("id: "), "{source}");
+    assert!(source.ends_with("# Untitled\n"), "{source}");
+
+    settle(&mut rt, &session, "the list row", |state| {
+        state.notes.iter().any(|note| note.title == "Untitled")
+    });
+    let new_id = rt
+        .state
+        .notes
+        .iter()
+        .find(|note| note.title == "Untitled")
+        .map(|note| note.id.clone())
+        .unwrap();
+    assert_eq!(
+        rt.state.selected.as_deref(),
+        Some(new_id.as_str()),
+        "the new note is selected"
+    );
+    assert_eq!(label_of(&rt, "detail-status-label"), "Saved");
+}
+
+#[test]
+fn deleting_the_open_note_moves_its_file_to_the_trash() {
+    let (mut rt, session, dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+    let id = rt.state.selected.clone().unwrap();
+
+    click(&mut rt, "delete-note");
+    assert_eq!(rt.state.confirm_delete.as_deref(), Some(id.as_str()));
+    click(&mut rt, "delete-confirm");
+    settle(&mut rt, &session, "the delete", |state| {
+        state.notes.len() == 1 && state.selected.is_none()
+    });
+
+    assert!(!vault.join("grocery-list.md").exists(), "out of the vault");
+    let trashed = fs::read_to_string(dir.path().join("trash/grocery-list.md")).unwrap();
+    assert!(trashed.contains("- milk"), "the body is recoverable");
+    assert_eq!(rt.state.notes[0].title, "Weekly review");
+
+    // File first, index second: a reindex of what is left agrees.
+    session
+        .handle()
+        .send(notex_store::Cmd::Reindex {
+            root: vault.clone(),
+        })
+        .unwrap();
+    settle(&mut rt, &session, "the reindex", |state| {
+        state.notes.len() == 1
+    });
+}
+
+#[test]
+fn renaming_the_title_renames_the_file_and_keeps_the_id() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+    let id = rt.state.selected.clone().unwrap();
+
+    rt.state
+        .draft
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text("# Shopping list\n\n- milk\n- coffee\n");
+    rt.state.draft_touched();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "save-note");
+    settle(&mut rt, &session, "the save", |state| {
+        state.draft.as_ref().is_some_and(|draft| !draft.is_dirty())
+    });
+
+    assert!(!vault.join("grocery-list.md").exists());
+    let moved = vault.join("shopping-list.md");
+    assert!(moved.exists(), "the file follows the title");
+    assert!(
+        fs::read_to_string(&moved)
+            .unwrap()
+            .contains("tags: [errands]"),
+        "the frontmatter still names the same note"
+    );
+    assert_eq!(rt.state.selected.as_deref(), Some(id.as_str()));
+    assert_eq!(rt.state.notes[0].title, "Shopping list");
+    assert_eq!(
+        rt.state.notes.len(),
+        2,
+        "one note, two files before the save"
+    );
+}
+
+#[test]
 fn a_file_changed_under_the_editor_is_a_conflict_the_user_can_resolve() {
     let (mut rt, session, _dir, vault) = open_vault();
     open_note(&mut rt, &session, 0);

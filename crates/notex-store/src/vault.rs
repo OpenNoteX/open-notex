@@ -260,6 +260,79 @@ pub fn file_hash(path: &Path) -> Result<u64, VaultError> {
     Ok(content_hash(&fs::read(path)?))
 }
 
+/// The file name a note with this title wants: lowercase, words joined by `-`,
+/// punctuation dropped. A title is not a file name, so the caller makes the
+/// result unique with [`unique_path_in`].
+pub fn file_name_for(title: &str) -> String {
+    let mut slug = String::with_capacity(title.len());
+    let mut dash = false;
+    for c in title.chars() {
+        if c.is_alphanumeric() {
+            for lowered in c.to_lowercase() {
+                slug.push(lowered);
+            }
+            dash = false;
+        } else if !slug.is_empty() && !dash {
+            slug.push('-');
+            dash = true;
+        }
+        if slug.len() >= 80 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "untitled" } else { slug };
+    format!("{slug}.md")
+}
+
+/// A free path for `file_name` in `dir`. `keep` is the file a rename is moving,
+/// so a note whose slug has not changed is not renamed to itself with a `-2`.
+pub fn unique_path_in(dir: &Path, file_name: &str, keep: Option<&Path>) -> PathBuf {
+    let candidate = dir.join(file_name);
+    if keep == Some(candidate.as_path()) || !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("untitled");
+    for n in 2..=9999_u32 {
+        let path = dir.join(format!("{stem}-{n}.md"));
+        if !path.exists() {
+            return path;
+        }
+    }
+    dir.join(format!("{stem}-{}.md", ItemId::new()))
+}
+
+/// Write a new note into `dir`: a fresh id in the frontmatter and a `# Title`
+/// body, so the file is a note before anything is indexed. Returns the file as
+/// read back, which is what the index stores.
+pub fn create_note(dir: &Path, title: &str) -> Result<Note, VaultError> {
+    let title = title.trim();
+    let mut frontmatter = Frontmatter::default();
+    frontmatter.set("id", ItemId::new().to_string());
+    let body = format!("# {title}\n");
+    let path = unique_path_in(dir, &file_name_for(title), None);
+    write_atomic(&path, &frontmatter.render(&body))?;
+    read_note(&path)
+}
+
+/// Move a file, across filesystems if the trash is on another volume: a rename
+/// covers the common case in one step, a copy and a remove the rest.
+pub fn move_file(from: &Path, to: &Path) -> Result<(), VaultError> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(18) => {
+            fs::copy(from, to)?;
+            fs::File::open(to)?.sync_all()?;
+            fs::remove_file(from)?;
+            Ok(())
+        }
+        Err(error) => Err(VaultError::Io(error)),
+    }
+}
+
 pub fn write_atomic(path: &Path, contents: &str) -> Result<(), VaultError> {
     let parent = path.parent().ok_or_else(|| {
         VaultError::Io(std::io::Error::new(
@@ -314,6 +387,64 @@ pub fn scan_paths(root: &Path) -> Result<Vec<PathBuf>, VaultError> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn a_title_becomes_a_readable_file_name() {
+        assert_eq!(file_name_for("Weekly review"), "weekly-review.md");
+        assert_eq!(file_name_for("  Launch: Q3 / Q4  "), "launch-q3-q4.md");
+        assert_eq!(file_name_for("Ünïcode Notes"), "ünïcode-notes.md");
+        assert_eq!(file_name_for("!!!"), "untitled.md");
+        assert_eq!(file_name_for("   "), "untitled.md");
+        let long = file_name_for(&"a".repeat(200));
+        assert_eq!(long, format!("{}.md", "a".repeat(80)));
+    }
+
+    #[test]
+    fn a_taken_file_name_gets_a_number_instead_of_being_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = unique_path_in(dir.path(), "ideas.md", None);
+        assert_eq!(first, dir.path().join("ideas.md"));
+        fs::write(&first, "# Ideas\n").unwrap();
+
+        let second = unique_path_in(dir.path(), "ideas.md", None);
+        assert_eq!(second, dir.path().join("ideas-2.md"));
+        fs::write(&second, "# Ideas\n").unwrap();
+        assert_eq!(
+            unique_path_in(dir.path(), "ideas.md", None),
+            dir.path().join("ideas-3.md")
+        );
+
+        // A rename of the file that already holds the name is not a rename.
+        assert_eq!(unique_path_in(dir.path(), "ideas.md", Some(&first)), first);
+    }
+
+    #[test]
+    fn a_created_note_is_a_valid_file_before_it_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = create_note(dir.path(), "Weekly review").unwrap();
+
+        assert_eq!(note.file.path, dir.path().join("weekly-review.md"));
+        assert_eq!(note.file.title, "Weekly review");
+        assert_eq!(note.body, "# Weekly review\n");
+        let source = fs::read_to_string(&note.file.path).unwrap();
+        let (frontmatter, _) = parse_note_source(&source).unwrap();
+        assert_eq!(frontmatter.get("id"), Some(note.file.id.as_str()));
+        assert!(!note.adopted, "the id was written by us");
+    }
+
+    #[test]
+    fn a_move_keeps_the_bytes_and_removes_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.md");
+        fs::write(&from, "---\nid: 01A\n---\n# A\n").unwrap();
+        let trash = dir.path().join("trash");
+        fs::create_dir_all(&trash).unwrap();
+        let to = trash.join("a.md");
+
+        move_file(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "---\nid: 01A\n---\n# A\n");
+    }
 
     #[test]
     fn frontmatter_round_trips_unknown_keys() {

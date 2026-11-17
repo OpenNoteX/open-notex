@@ -88,6 +88,10 @@ pub const SCENES: &[Scene] = &[
         s.draft_touched();
         s.save_conflict(WEEKLY_ID, "This file changed on disk since you opened it.");
     }),
+    ("notes-delete", |s| {
+        weekly_review(s);
+        s.request_delete();
+    }),
     ("projects-empty", |s| {
         s.route = Route::Projects;
         s.load = Load::Ready;

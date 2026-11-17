@@ -196,6 +196,18 @@ fn bench(args: &[String]) -> Result<(), String> {
         );
     }
 
+    // The reindex path, when a vault is given: this is what a launch pays for.
+    if let Some(vault_dir) = value(args, "vault") {
+        let vault_dir = PathBuf::from(vault_dir);
+        let started = Instant::now();
+        let count = index::reindex_vault(&mut conn, &vault_dir, now_ms(), "bench")
+            .map_err(|error| error.to_string())?;
+        println!(
+            "reindex: {count} notes in {} ms (one transaction)",
+            started.elapsed().as_millis()
+        );
+    }
+
     let size = std::fs::metadata(&db_path)
         .map(|meta| meta.len())
         .map_err(|error| error.to_string())?;
