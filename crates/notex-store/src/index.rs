@@ -17,8 +17,83 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// One row of the notes list. The body is not here: it lives in the vault and is
+/// read on open, so a list never holds a whole vault in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteSummary {
+    pub id: String,
+    pub path: std::path::PathBuf,
+    pub title: String,
+    pub tags: Vec<String>,
+}
+
 pub fn upsert_note(
     conn: &mut Connection,
+    note: &NoteFile,
+    body: &str,
+    now: i64,
+    device_id: &str,
+) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    upsert_in(&tx, note, body, now, device_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Many upserts in one transaction, for a reindex. One commit for the whole
+/// vault instead of one per file turns a 10k-note rebuild from seconds into
+/// frames; a crash still leaves the old index, because the transaction rolls back.
+pub struct Batch<'a> {
+    tx: rusqlite::Transaction<'a>,
+    now: i64,
+    device_id: &'a str,
+    count: u64,
+}
+
+impl<'a> Batch<'a> {
+    pub fn new(conn: &'a mut Connection, now: i64, device_id: &'a str) -> Result<Self, StoreError> {
+        Ok(Self {
+            tx: conn.transaction()?,
+            now,
+            device_id,
+            count: 0,
+        })
+    }
+
+    pub fn upsert(&mut self, note: &NoteFile, body: &str) -> Result<(), StoreError> {
+        // A reindex runs at every launch. Reading a file is cheap; rewriting an
+        // unchanged row is not, and would bump `rev` and append an oplog row for
+        // every note each time the app opens.
+        let unchanged: Option<(i64, String, Option<i64>)> = self
+            .tx
+            .prepare_cached("SELECT hash, path, fts_rowid FROM note_index WHERE id = ?1")?
+            .query_row(params![note.id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()?;
+        let same_file = matches!(
+            &unchanged,
+            Some((hash, path, Some(_)))
+                if *hash == note.hash as i64
+                    && path.as_str() == note.path.to_string_lossy()
+        );
+
+        if !same_file {
+            upsert_in(&self.tx, note, body, self.now, self.device_id)?;
+        }
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Commit the batch and report how many notes it wrote.
+    pub fn commit(self) -> Result<u64, StoreError> {
+        self.tx.commit()?;
+        Ok(self.count)
+    }
+}
+
+fn upsert_in(
+    tx: &rusqlite::Transaction<'_>,
     note: &NoteFile,
     body: &str,
     now: i64,
@@ -27,16 +102,23 @@ pub fn upsert_note(
     let path = note.path.to_string_lossy().to_string();
     let tags = serde_json::to_string(&note.tags).unwrap_or_else(|_| "[]".to_owned());
 
-    let tx = conn.transaction()?;
+    // Delete the old search row by its rowid: `item_id` is UNINDEXED, so
+    // deleting by it would scan the whole FTS table for every note. Statements
+    // are cached: a reindex runs this function once per file.
+    let fts_rowid: Option<i64> = tx
+        .prepare_cached("SELECT fts_rowid FROM note_index WHERE id = ?1")?
+        .query_row(params![note.id], |row| row.get(0))
+        .optional()?;
+    if let Some(rowid) = fts_rowid {
+        tx.prepare_cached("DELETE FROM notes_fts WHERE rowid = ?1")?
+            .execute(params![rowid])?;
+    }
 
     // A rename leaves the old path on a different id; that row is gone.
-    tx.execute(
-        "DELETE FROM note_index WHERE path = ?1 AND id <> ?2",
-        params![path, note.id],
-    )?;
-    tx.execute("DELETE FROM notes_fts WHERE item_id = ?1", params![note.id])?;
+    tx.prepare_cached("DELETE FROM note_index WHERE path = ?1 AND id <> ?2")?
+        .execute(params![path, note.id])?;
 
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO note_index(id, path, hash, mtime_ns, size, title, tags,
                                 created_at, updated_at, rev)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1)
@@ -49,58 +131,53 @@ pub fn upsert_note(
              tags = excluded.tags,
              updated_at = excluded.updated_at,
              rev = note_index.rev + 1",
-        params![
-            note.id,
-            path,
-            note.hash as i64,
-            note.mtime_ns,
-            note.size,
-            note.title,
-            tags,
-            now
-        ],
-    )?;
+    )?
+    .execute(params![
+        note.id,
+        path,
+        note.hash as i64,
+        note.mtime_ns,
+        note.size,
+        note.title,
+        tags,
+        now
+    ])?;
 
-    tx.execute(
-        "INSERT INTO notes_fts(item_id, title, body) VALUES (?1, ?2, ?3)",
-        params![note.id, note.title, body],
-    )?;
+    tx.prepare_cached("INSERT INTO notes_fts(item_id, title, body) VALUES (?1, ?2, ?3)")?
+        .execute(params![note.id, note.title, body])?;
+    let fts_rowid = tx.last_insert_rowid();
+    tx.prepare_cached("UPDATE note_index SET fts_rowid = ?1 WHERE id = ?2")?
+        .execute(params![fts_rowid, note.id])?;
 
-    tx.execute(
-        "DELETE FROM item_tags WHERE item_type = 'note' AND item_id = ?1",
-        params![note.id],
-    )?;
+    tx.prepare_cached("DELETE FROM item_tags WHERE item_type = 'note' AND item_id = ?1")?
+        .execute(params![note.id])?;
     for tag in &note.tags {
         let tag_id: String = match tx
-            .query_row("SELECT id FROM tags WHERE name = ?1", params![tag], |row| {
-                row.get(0)
-            })
+            .prepare_cached("SELECT id FROM tags WHERE name = ?1")?
+            .query_row(params![tag], |row| row.get(0))
             .optional()?
         {
             Some(id) => id,
             None => {
                 let id = ItemId::new().to_string();
-                tx.execute(
-                    "INSERT INTO tags(id, name) VALUES (?1, ?2)",
-                    params![id, tag],
-                )?;
+                tx.prepare_cached("INSERT INTO tags(id, name) VALUES (?1, ?2)")?
+                    .execute(params![id, tag])?;
                 id
             }
         };
-        tx.execute(
-            "INSERT OR IGNORE INTO item_tags(tag_id, item_type, item_id) VALUES (?1, 'note', ?2)",
-            params![tag_id, note.id],
-        )?;
+        tx.prepare_cached(
+            "INSERT OR IGNORE INTO item_tags(tag_id, item_type, item_id)
+             VALUES (?1, 'note', ?2)",
+        )?
+        .execute(params![tag_id, note.id])?;
     }
 
-    let rev: i64 = tx.query_row(
-        "SELECT rev FROM note_index WHERE id = ?1",
-        params![note.id],
-        |row| row.get(0),
-    )?;
+    let rev: i64 = tx
+        .prepare_cached("SELECT rev FROM note_index WHERE id = ?1")?
+        .query_row(params![note.id], |row| row.get(0))?;
     let payload = serde_json::json!({ "path": path, "hash": note.hash }).to_string();
     oplog::append(
-        &tx,
+        tx,
         oplog::Entry {
             entity: "note",
             entity_id: &note.id,
@@ -112,7 +189,6 @@ pub fn upsert_note(
         },
     )?;
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -123,17 +199,19 @@ pub fn delete_note(
     device_id: &str,
 ) -> Result<(), StoreError> {
     let tx = conn.transaction()?;
-    let rev: i64 = tx
+    let existing: Option<(i64, Option<i64>)> = tx
         .query_row(
-            "SELECT rev FROM note_index WHERE id = ?1",
+            "SELECT rev, fts_rowid FROM note_index WHERE id = ?1",
             params![id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .unwrap_or(0);
+        .optional()?;
+    let (rev, fts_rowid) = existing.unwrap_or((0, None));
 
+    if let Some(rowid) = fts_rowid {
+        tx.execute("DELETE FROM notes_fts WHERE rowid = ?1", params![rowid])?;
+    }
     tx.execute("DELETE FROM note_index WHERE id = ?1", params![id])?;
-    tx.execute("DELETE FROM notes_fts WHERE item_id = ?1", params![id])?;
     tx.execute(
         "DELETE FROM item_tags WHERE item_type = 'note' AND item_id = ?1",
         params![id],
@@ -208,6 +286,42 @@ pub fn fts_query(raw: &str) -> Option<String> {
 pub fn note_count(conn: &Connection) -> Result<i64, StoreError> {
     let count = conn.query_row("SELECT count(*) FROM note_index", [], |row| row.get(0))?;
     Ok(count)
+}
+
+/// Every indexed note, alphabetical by title. This is the list pane's read model:
+/// small enough to hold, and cheap to rebuild from the vault.
+pub fn notes(conn: &Connection) -> Result<Vec<NoteSummary>, StoreError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id, path, title, tags
+         FROM note_index
+         ORDER BY title COLLATE NOCASE, path",
+    )?;
+
+    let notes = statement
+        .query_map([], |row| {
+            let tags: String = row.get(3)?;
+            Ok(NoteSummary {
+                id: row.get(0)?,
+                path: std::path::PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                tags: serde_json::from_str(&tags).unwrap_or_default(),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(notes)
+}
+
+/// The file an indexed id names, or `None` when the note is gone from the index.
+pub fn note_path(conn: &Connection, id: &str) -> Result<Option<std::path::PathBuf>, StoreError> {
+    let path = conn
+        .query_row(
+            "SELECT path FROM note_index WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(path.map(std::path::PathBuf::from))
 }
 
 #[cfg(test)]
@@ -318,5 +432,55 @@ mod tests {
             .query_row("SELECT path FROM note_index", [], |row| row.get(0))
             .unwrap();
         assert_eq!(path, "/vault/renamed.md");
+    }
+
+    #[test]
+    fn the_note_list_is_alphabetical_and_carries_its_tags() {
+        let mut conn = db::open_in_memory().unwrap();
+        upsert_note(&mut conn, &note("01A", "zebra"), "z", 1, "dev").unwrap();
+        upsert_note(&mut conn, &note("01B", "Apple"), "a", 2, "dev").unwrap();
+        let mut tagged = note("01C", "mango");
+        tagged.tags = vec!["work".to_owned(), "review".to_owned()];
+        upsert_note(&mut conn, &tagged, "m", 3, "dev").unwrap();
+
+        let notes = notes(&conn).unwrap();
+        let titles: Vec<&str> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["Apple", "mango", "zebra"], "case-insensitive");
+        let mango = notes.iter().find(|n| n.id == "01C").unwrap();
+        assert_eq!(mango.tags, vec!["work", "review"]);
+        assert_eq!(mango.path, PathBuf::from("/vault/01C.md"));
+    }
+
+    #[test]
+    fn a_batch_commits_every_note_in_one_transaction() {
+        let mut conn = db::open_in_memory().unwrap();
+        let mut batch = Batch::new(&mut conn, 1, "dev").unwrap();
+        for (id, title) in [("01A", "alpha"), ("01B", "beta"), ("01C", "gamma")] {
+            let n = note(id, title);
+            batch.upsert(&n, "launch").unwrap();
+        }
+        assert_eq!(batch.commit().unwrap(), 3);
+
+        assert_eq!(note_count(&conn).unwrap(), 3);
+        assert_eq!(search(&conn, "launch", 10).unwrap().len(), 3);
+        let logged: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM oplog WHERE entity = 'note'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(logged, 3, "every note logs its oplog row in the batch");
+    }
+
+    #[test]
+    fn a_note_path_is_none_for_an_unknown_id() {
+        let mut conn = db::open_in_memory().unwrap();
+        upsert_note(&mut conn, &note("01A", "known"), "x", 1, "dev").unwrap();
+        assert_eq!(
+            note_path(&conn, "01A").unwrap(),
+            Some(PathBuf::from("/vault/01A.md"))
+        );
+        assert!(note_path(&conn, "missing").unwrap().is_none());
     }
 }

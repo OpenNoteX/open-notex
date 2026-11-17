@@ -3,13 +3,14 @@
 Local-first notes, tasks, habits and reminders in one app.
 Rust, [Rune](https://github.com/anomalyco/rune) for the UI, SQLite for the store.
 
-**Status: `0.0.1` pre-alpha.** M0 (context, workspace, store, time, CI) and M0.5
-(the shell) are done: the app opens a window with a sidebar, a list and a detail
-pane, in light and dark, and renders every screen headlessly for review.
+**Status: `0.0.1` pre-alpha.** M0 (context, workspace, store, time, CI), M0.5
+(the shell) and M1a are done: the app opens a window, indexes a real vault, lists
+its notes and renders the selected note's Markdown. The note editor is next.
 
-| Light | Dark |
-| --- | --- |
-| ![Today, light](docs/images/snaps/shell-today-light-1x.png) | ![Today, dark](docs/images/snaps/shell-today-dark-1x.png) |
+| | Light | Dark |
+| --- | --- | --- |
+| Today | ![Today, light](docs/images/snaps/shell-today-light-1x.png) | ![Today, dark](docs/images/snaps/shell-today-dark-1x.png) |
+| Notes | ![Notes, light](docs/images/snaps/notes-list-light-1x.png) | ![Notes, dark](docs/images/snaps/notes-list-dark-1x.png) |
 
 ## The idea
 
@@ -51,12 +52,18 @@ docs/                plan, architecture, data model, scheduling, testing
 
 ```sh
 cargo build
-cargo run -p open-notex               # opens the window
+cargo run -p open-notex               # opens the window on ~/Documents/Notes
+cargo run -p open-notex -- --vault /path/to/notes
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 cargo xtask snap                      # PNG + element tree for every scene
 ```
+
+The vault is a folder of Markdown files; `--vault` overrides the default. The
+index lives at `~/Library/Application Support/openNoteX/notex.db`, outside the
+vault, and is rebuilt from the files at launch. Deleting it costs one reindex,
+not a note.
 
 The toolchain is pinned by `rust-toolchain.toml` (Rust 1.99.1) to match Rune.
 `cargo xtask snap` writes to `artifacts/snaps`, which is not committed; the

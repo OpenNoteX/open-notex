@@ -46,8 +46,11 @@ The database lives in the platform data directory, never inside the vault.
 ## The worker contract
 
 ```rust
-pub enum Cmd { SaveNote(..), CompleteTask(..), CheckHabit(..), LoadToday(..), ReindexAll(..) }
-pub enum Evt { NoteSaved(..), Today(..), Progress { .. }, Failed { .. } }
+pub enum Cmd { Ping, Reindex { root }, ListNotes, OpenNote { id }, SaveNote { path, body }, Shutdown }
+pub enum Evt {
+    Pong, Indexed { count }, Notes(Vec<NoteSummary>), Opened { id, body },
+    OpenFailed { id, err }, Saved { id, hash }, Failed { op, err },
+}
 ```
 
 - One consumer thread owns the only `rusqlite::Connection`; commands are
@@ -58,7 +61,7 @@ pub enum Evt { NoteSaved(..), Today(..), Progress { .. }, Failed { .. } }
   polling loops, no sleeps, no timers other than the scheduler's.
 - The UI updates optimistically, then reconciles with the reply. A failed
   command reverts the optimistic row and raises a toast.
-- Bulk jobs (`ReindexAll`, import) are one command that emits `Progress` and can
+- Bulk jobs (`Reindex`, import) are one command that emits `Progress` and can
   be cancelled by request id.
 
 ## The shell
@@ -78,14 +81,32 @@ tooltip.
 - The palette is three seeds — background, ink, accent — resolved by
   `Kit::from_palette_focus`. Nothing else is hand-picked, so light and dark
   cannot drift, and tests assert the accent and secondary text clear 3:1.
-- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes, Projects,
-  Settings, Search, loading and failed. `cargo xtask snap` renders each through
-  the real binary in both themes, then asserts the tree still has the sidebar,
-  the toolbar and a nav row.
+- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes (empty and
+  with an open note), Projects, Settings, Search, loading and failed.
+  `cargo xtask snap` renders each through the real binary in both themes, then
+  asserts the tree still has the sidebar, the toolbar and a nav row.
 
-There is no store yet, so every route is `Load::Ready` with nothing in it. The
-loading and failed states exist now because they are the hardest thing to
-retrofit once a screen has content.
+### The store behind it
+
+`apps/open-notex` is the only place that connects the shell to storage. `setup`
+runs once on the UI thread: it resolves
+`~/Library/Application Support/openNoteX/notex.db`, refuses a database inside
+the vault, spawns the one worker thread with the `Waker` and sends `Reindex`.
+`poll` drains `StoreHandle::drain()` into `State` and returns whether the view
+changed, so an idle app draws nothing.
+
+- The list is `Evt::Notes`: id, title and tags, alphabetical by title. Bodies
+  are never in the index: `Cmd::OpenNote` names an id, the worker looks up the
+  path and reads the Markdown file. For writes, file first, index second still
+  holds.
+- Selecting a row only sets `State::wanted`; `poll` turns it into a command. A
+  body that arrives after the selection moved is dropped, not raced.
+- A missing vault, a failed reindex or a database inside the vault becomes
+  `Load::Failed` with a dismissible message; the window still opens.
+- Headless runs (`--snap`, `--scene`, the headless tests) skip `setup` entirely,
+  so a snapshot never reads a real vault and `xtask snap` stays deterministic.
+  The integration tests own a `Session` directly and drive `pump()` against a
+  temp vault.
 
 ## Time
 

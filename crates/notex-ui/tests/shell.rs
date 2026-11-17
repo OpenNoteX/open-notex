@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use notex_ui::{Load, Route, State, view};
+use notex_ui::{Load, NoteBody, NoteRow, Route, State, view};
 use rune::runtime::ElementInfo;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -276,4 +276,77 @@ fn scenes_render_distinct_screens() {
         assert!(rt.find("sidebar").is_some(), "scene {name} has no sidebar");
         assert!(rt.find("toolbar").is_some(), "scene {name} has no toolbar");
     }
+}
+
+fn notes_state() -> State {
+    let mut state = vault_state();
+    state.route = Route::Notes;
+    state.set_notes(vec![
+        NoteRow::new("01A", "Apple", &["fruit"]),
+        NoteRow::new("01B", "Banana", &[]),
+    ]);
+    state
+}
+
+#[test]
+fn the_notes_list_shows_a_row_per_note_and_selects_on_press() {
+    let mut rt = runtime(notes_state());
+
+    assert_eq!(label_of(&rt, "list-subtitle"), "2 notes");
+    assert!(rt.find("list-note-01A").is_some());
+    assert!(rt.find("list-note-01B").is_some());
+    assert_eq!(label_of(&rt, "detail-title"), Route::Notes.empty_title());
+
+    click(&mut rt, "list-note-01B");
+    assert_eq!(rt.state.selected.as_deref(), Some("01B"));
+    assert_eq!(rt.state.body, NoteBody::Loading);
+    assert!(
+        rt.find("detail-loading").is_some(),
+        "the body is on its way"
+    );
+    assert!(rt.find("detail-hint").is_none(), "the empty state is gone");
+}
+
+#[test]
+fn an_open_note_renders_its_markdown_in_the_detail_pane() {
+    let mut state = notes_state();
+    state.selected = Some("01A".to_owned());
+    state.body = NoteBody::Ready(
+        "# Apple\n\nA crisp note with a [link](https://example.com).\n\n- one\n- two\n".to_owned(),
+    );
+    let rt = runtime(state);
+
+    assert_eq!(label_of(&rt, "detail-title"), "Apple");
+    assert_eq!(label_of(&rt, "detail-tags"), "fruit");
+    assert!(rt.find("detail-body").is_some(), "Markdown is mounted");
+    let shown: String = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(shown.contains("A crisp note with a link."), "{shown}");
+}
+
+#[test]
+fn a_failed_body_explains_itself_without_losing_the_list() {
+    let mut state = notes_state();
+    state.selected = Some("01B".to_owned());
+    state.body = NoteBody::Failed("io: permission denied".to_owned());
+    let rt = runtime(state);
+
+    assert!(rt.find("detail-failed").is_some());
+    assert_eq!(label_of(&rt, "detail-message"), "io: permission denied");
+    assert!(rt.find("list-note-01A").is_some(), "the list stays usable");
+}
+
+#[test]
+fn a_note_that_left_the_list_clears_the_selection() {
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.set_notes(vec![NoteRow::new("01B", "Banana", &[])]);
+
+    assert_eq!(state.selected, None);
+    assert_eq!(state.body, NoteBody::None);
+    assert_eq!(state.wanted, None, "the stale read is dropped too");
 }

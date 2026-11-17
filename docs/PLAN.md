@@ -1,7 +1,8 @@
 # Plan
 
-Status: `0.0.1` pre-alpha. M0 (context, workspace, store, time, CI) and M0.5
-(the shell) are done; M1 — notes as files — is next.
+Status: `0.0.1` pre-alpha. M0 (context, workspace, store, time, CI), M0.5
+(the shell) and M1a (the store behind the shell) are done; the rest of M1 — the
+note editor — is next.
 
 One app, four primitives: **capture (notes) → plan (tasks) → repeat (habits) →
 remember (reminders)**. SQLite and a Markdown vault are the source of truth.
@@ -13,6 +14,7 @@ Rune renders. No network in v1.
 | --- | --- | --- |
 | M0 ✅ | Context docs, workspace, store contract, migrations, vault writer, time math, CI | `cargo test` green on pure layers; docs committed |
 | M0.5 ✅ | Rune shell: window, three panes, theme, headless snapshot harness | `cargo run` opens a window; snapshot PNG + tree JSON asserted |
+| M1a ✅ | Store in the app: DB worker wired to the UI, real notes list, note bodies read from Markdown, reindex on launch | Open the app on a vault and read a note; delete the DB, relaunch, the list comes back |
 | M1 | Notes as files: create/edit/rename/delete, watcher, autosave, tags, FTS search, Markdown preview, Obsidian import, ⌘K | Edit a note in another editor and see it reflected; delete the DB, `--reindex`, search is identical |
 | M2 | Projects, tasks, Today, due dates, recurring tasks, reorder | Today matches reality after restart; recurrence correct across DST |
 | M3 | Habits, streak engine, heatmap, freezes, at-risk states | Property tests across four timezones; hand-checked streak cases |

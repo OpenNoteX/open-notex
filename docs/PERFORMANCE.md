@@ -41,8 +41,35 @@ M0.5 shell, release build, macOS 27.0.1 on an Apple M5, warm file cache.
 parsing, state, GPU init and one laid-out, painted frame. The 0.6 s cold-cache
 figure is the same run with the 28 MB binary read from disk for the first time.
 
-The 10k-note rows stay unmeasured until M1, when there is a store to fill. Every
-number above is small enough that the budgets still have room for it.
+M1a store, release build, same machine, 10k-note fixture from `xtask seed`:
+
+| Metric | Measured | Budget |
+| --- | --- | --- |
+| `--reindex`, 10k notes, empty database | 4.2 s | ≤ 3 s target, 10 s gate |
+| `--reindex`, 10k notes, unchanged vault | 0.21–0.24 s | — |
+| `notes()` list for 10k notes | 4.9–5.2 ms | — |
+| `COUNT(*)` for 10k notes | 0.3–0.5 ms | — |
+| FTS query, 50 hits | 3.3–5.1 ms | — |
+| DB size, 10k notes | 11.4 MiB | ≤ 25 MB |
+| Vault scan (10k files, cache warm) | 0.24 s | — |
+
+`notes()` is the whole index, decoded into `NoteRow`s: ~5 ms and a few MB at
+10k, inside the 8 MB read model budget but not bounded by it. It has to become a
+windowed query before the 50k row is meaningful.
+
+First frame does not wait for the index: a warm launch sends `ListNotes` and
+draws the list frame while the worker answers; a fresh launch draws the same
+frame with the list's "opening" state. The 10k cold-start row is therefore the
+shell's first-frame number plus the list round trip, not the reindex.
+
+The 3 s reindex target is still missed on a **cold full rebuild** of 10k notes;
+the 10 s gate holds. The first measurement of the same work was 8.4 s, because
+every note deleted its search row with `WHERE item_id = ?` and `item_id` is
+`UNINDEXED`, so each upsert scanned the whole FTS table. Migration
+`0002_fts_rowid` stores the FTS rowid beside the note and the reindex became
+linear. Batching the vault into one transaction and skipping unchanged files
+took the rest; a warm launch now spends ~0.2 s reading file metadata and writes
+nothing to the database.
 
 ## Where memory goes
 
@@ -63,7 +90,8 @@ number above is small enough that the budgets still have room for it.
    change only while on screen.
 3. Virtualize every long list (`.growth()` + `.virtualize(h)`), so a 10k-row list
    costs the same as 20 rows.
-4. Read models are bounded per route; the UI never holds all notes.
+4. Read models are bounded per route. The notes list is the one unbounded read
+   today (~5 ms and a few MB at 10k); it becomes a window before 50k.
 5. Titles and hashes only in the index; FTS returns snippets, not documents.
 6. Daily counts come from `habit_days` and small rollups, not `COUNT(*)` scans.
 7. Prepared-statement cache and covering indexes for the four hot queries.

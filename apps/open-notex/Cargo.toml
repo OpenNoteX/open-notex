@@ -8,14 +8,19 @@ repository.workspace = true
 description = "openNoteX: notes, tasks, habits and reminders in one local-first app."
 publish = false
 
-[[bin]]
-name = "open-notex"
-path = "src/main.rs"
-
 [dependencies]
+notex-store.workspace = true
 notex-ui.workspace = true
 rune.workspace = true
 rune-kit.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "open-notex"
+path = "src/main.rs"
 
 [lints]
 workspace = true

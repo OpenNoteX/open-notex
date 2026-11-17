@@ -8,6 +8,22 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- The Notes screen shows the real vault: `apps/open-notex` opens
+  `~/Library/Application Support/openNoteX/notex.db`, starts the one DB worker,
+  lists every note by title with its tags, and renders the selected note's
+  Markdown body. Selecting a row reads its `.md` file through the worker; bodies
+  never enter the index.
+- `notex-store`: `NoteSummary`, `notes()` (alphabetical, tags parsed),
+  `note_path()` and `Batch`, which indexes a whole vault in one transaction.
+- `notex-store`: `Cmd::ListNotes`, `Cmd::OpenNote`, `Evt::Notes`, `Evt::Opened`
+  and `Evt::OpenFailed` on the worker.
+- `notex-ui`: `NoteRow`, `NoteBody` and the `notes-list` scene; the list has
+  loading, empty and failed states, the detail pane has loading, failed and
+  "no note selected" states.
+- A warm launch lists the existing index first and reindexes behind it; a fresh
+  database reindexes first and keeps the list's "opening" state.
+- Reindex skips a file whose hash and path already match, so a repeat scan
+  writes no rows, appends no oplog entries and does not bump `rev`.
 - The shell: a window with a sidebar, a list and a detail pane, ten routes
   (Inbox, Today, Upcoming, Projects, Notes, Tags, Habits, Reminders, Search,
   Settings), `⌘K` for search, `⌘,` for settings and the sidebar toggle.
@@ -33,3 +49,16 @@ All notable changes to this project. The format follows
   replacement.
 - `xtask seed` to generate a fixture vault and database.
 - CI: formatting, clippy with `-D warnings`, and the workspace test suite.
+
+### Changed
+
+- The database lives in the platform data directory, never in the vault; startup
+  refuses a path inside it.
+- `xtask seed` indexes through `Batch`, so its timings match the app's reindex.
+
+### Fixed
+
+- `DELETE FROM notes_fts WHERE item_id = ?` scanned the whole search table for
+  every note (`item_id` is `UNINDEXED`), which made a 10k-note reindex
+  quadratic. Migration `0002_fts_rowid` stores each note's FTS rowid and deletes
+  use it: cold full index of 10k notes went from 8.4 s to 4.2 s.

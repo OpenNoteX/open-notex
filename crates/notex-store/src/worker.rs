@@ -29,6 +29,12 @@ pub enum Cmd {
         path: PathBuf,
         body: String,
     },
+    /// The list pane's read model.
+    ListNotes,
+    /// Read one note's body from its file (never from SQLite).
+    OpenNote {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -37,6 +43,9 @@ pub enum Evt {
     Pong,
     Indexed { count: u64 },
     Saved { id: String, hash: u64 },
+    Notes(Vec<crate::index::NoteSummary>),
+    Opened { id: String, body: String },
+    OpenFailed { id: String, err: String },
     Failed { op: &'static str, err: String },
 }
 
@@ -173,19 +182,36 @@ fn execute(conn: &mut Connection, cmd: Cmd, device: &str) -> Vec<Evt> {
                 err: error.to_string(),
             }],
         },
+        Cmd::ListNotes => match index::notes(conn) {
+            Ok(notes) => vec![Evt::Notes(notes)],
+            Err(error) => vec![Evt::Failed {
+                op: "list_notes",
+                err: error.to_string(),
+            }],
+        },
+        Cmd::OpenNote { id } => match open_note(conn, &id) {
+            Ok(Some(body)) => vec![Evt::Opened { id, body }],
+            Ok(None) => vec![Evt::OpenFailed {
+                id,
+                err: "the note is no longer in the index".to_owned(),
+            }],
+            Err(error) => vec![Evt::OpenFailed {
+                id,
+                err: error.to_string(),
+            }],
+        },
         Cmd::Shutdown => Vec::new(),
     }
 }
 
 fn reindex(conn: &mut Connection, root: &std::path::Path, device: &str) -> Result<u64, StoreError> {
     let paths = vault::scan_paths(root)?;
-    let mut count = 0_u64;
+    let mut batch = index::Batch::new(conn, now_ms(), device)?;
     for path in paths {
         let note = vault::read_note(&path)?;
-        index::upsert_note(conn, &note.file, &note.body, now_ms(), device)?;
-        count += 1;
+        batch.upsert(&note.file, &note.body)?;
     }
-    Ok(count)
+    batch.commit()
 }
 
 fn save_note(
@@ -198,6 +224,15 @@ fn save_note(
     let note = vault::read_note(path)?;
     index::upsert_note(conn, &note.file, &note.body, now_ms(), device)?;
     Ok(note)
+}
+
+/// Read a body from the vault through the index. `None` means the id is no
+/// longer indexed (deleted or renamed since the list was read).
+fn open_note(conn: &Connection, id: &str) -> Result<Option<String>, StoreError> {
+    let Some(path) = index::note_path(conn, id)? else {
+        return Ok(None);
+    };
+    Ok(Some(vault::read_note(&path)?.body))
 }
 
 fn device_id(conn: &Connection) -> Result<String, StoreError> {
@@ -281,6 +316,34 @@ mod tests {
             .unwrap();
         assert_eq!(wait(&handle, &rx), vec![Evt::Indexed { count: 1 }]);
 
+        handle.send(Cmd::ListNotes).unwrap();
+        let listed = wait(&handle, &rx);
+        let [Evt::Notes(notes)] = listed.as_slice() else {
+            panic!("expected a note list, got {listed:?}");
+        };
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "A");
+        let id = notes[0].id.clone();
+
+        handle.send(Cmd::OpenNote { id: id.clone() }).unwrap();
+        assert_eq!(
+            wait(&handle, &rx),
+            vec![Evt::Opened {
+                id,
+                body: "# A\n\nhello plan\n".to_owned()
+            }]
+        );
+
+        handle
+            .send(Cmd::OpenNote {
+                id: "missing".to_owned(),
+            })
+            .unwrap();
+        assert!(matches!(
+            wait(&handle, &rx).as_slice(),
+            [Evt::OpenFailed { .. }]
+        ));
+
         handle
             .send(Cmd::SaveNote {
                 path: vault_dir.join("b.md"),
@@ -296,6 +359,43 @@ mod tests {
         assert_eq!(index::note_count(&conn).unwrap(), 2);
         assert_eq!(index::search(&conn, "task", 10).unwrap().len(), 1);
         assert_eq!(index::search(&conn, "plan", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reindexing_an_unchanged_vault_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_dir = dir.path().join("vault");
+        fs::create_dir_all(&vault_dir).unwrap();
+        fs::write(vault_dir.join("a.md"), "# A\n\nsteady\n").unwrap();
+        let db_path = dir.path().join("notex.db");
+
+        let (tx, rx) = mpsc::channel();
+        let worker = spawn(&db_path, Chan(tx)).unwrap();
+        let handle = worker.handle();
+
+        for _ in 0..2 {
+            handle
+                .send(Cmd::Reindex {
+                    root: vault_dir.clone(),
+                })
+                .unwrap();
+            assert_eq!(wait(&handle, &rx), vec![Evt::Indexed { count: 1 }]);
+        }
+        worker.shutdown();
+
+        let conn = db::open(&db_path).unwrap();
+        let logged: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM oplog WHERE entity = 'note'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(logged, 1, "the second scan wrote no oplog rows");
+        let rev: i64 = conn
+            .query_row("SELECT rev FROM note_index", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rev, 1, "an unchanged note keeps its revision");
     }
 
     #[test]

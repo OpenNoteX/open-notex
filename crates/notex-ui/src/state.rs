@@ -23,6 +23,41 @@ pub enum Load {
     Failed(String),
 }
 
+/// A row in the notes list. The body is not here: it is read on demand, so a long
+/// vault never sits in memory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NoteRow {
+    pub id: String,
+    pub title: String,
+    /// Frontmatter tags, without the leading `#`.
+    pub tags: Vec<String>,
+}
+
+impl NoteRow {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, tags: &[&str]) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        }
+    }
+
+    /// The second line of the row: `work · review`, or the empty string.
+    pub fn tag_line(&self) -> String {
+        self.tags.join(" · ")
+    }
+}
+
+/// What the detail pane holds for the selected note.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum NoteBody {
+    #[default]
+    None,
+    Loading,
+    Ready(String),
+    Failed(String),
+}
+
 pub struct State {
     /// What the content pane is showing.
     pub route: Route,
@@ -31,6 +66,15 @@ pub struct State {
     /// The detail pane's width and open state.
     pub detail: PaneState,
     pub load: Load,
+    /// The notes list, alphabetical, from the index.
+    pub notes: Vec<NoteRow>,
+    /// The selected note's id; `None` when the list has no selection.
+    pub selected: Option<String>,
+    /// The selected note's body, or why it is not here yet.
+    pub body: NoteBody,
+    /// A note the list asked the app to read. The app drains it in `poll`; the
+    /// view never opens a file itself.
+    pub wanted: Option<String>,
     /// Where notes live, for display. The app opens it; the UI only shows it.
     pub vault: String,
     /// Build identity, shown in Settings.
@@ -48,8 +92,56 @@ impl State {
             sidebar: PaneState::new(216.0).range(180.0, 320.0),
             detail: PaneState::new(440.0).range(320.0, 720.0),
             load: Load::Ready,
+            notes: Vec::new(),
+            selected: None,
+            body: NoteBody::None,
+            wanted: None,
             vault: vault.into(),
             version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+
+    /// Replace the list. A selection whose note disappeared (deleted or renamed
+    /// elsewhere) is cleared rather than left pointing at nothing.
+    pub fn set_notes(&mut self, notes: Vec<NoteRow>) {
+        if let Some(selected) = &self.selected
+            && !notes.iter().any(|note| &note.id == selected)
+        {
+            if self.wanted.as_deref() == Some(selected.as_str()) {
+                self.wanted = None;
+            }
+            self.selected = None;
+            self.body = NoteBody::None;
+        }
+        self.notes = notes;
+    }
+
+    /// Select a note and ask the app to read its body. Pressing the selected row
+    /// again is a no-op, so it does not re-read the file.
+    pub fn select_note(&mut self, id: &str) {
+        if self.selected.as_deref() == Some(id) {
+            return;
+        }
+        self.selected = Some(id.to_owned());
+        self.body = NoteBody::Loading;
+        self.wanted = Some(id.to_owned());
+    }
+
+    /// The note the app should read, if any. Called from `poll`, never the view.
+    pub fn take_wanted(&mut self) -> Option<String> {
+        self.wanted.take()
+    }
+
+    /// A body arrived. A stale one (the selection moved on) is dropped.
+    pub fn show_body(&mut self, id: &str, body: String) {
+        if self.selected.as_deref() == Some(id) {
+            self.body = NoteBody::Ready(body);
+        }
+    }
+
+    pub fn fail_body(&mut self, id: &str, error: String) {
+        if self.selected.as_deref() == Some(id) {
+            self.body = NoteBody::Failed(error);
         }
     }
 
