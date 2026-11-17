@@ -58,10 +58,11 @@ pub enum Evt {
         title: String,
         tags: Vec<String>,
     },
+    /// The file is not the one the editor read. Nothing is written; the user
+    /// chooses to reload or to overwrite.
     SaveConflict {
         id: String,
         token: u64,
-        disk_hash: u64,
     },
     SaveFailed {
         id: String,
@@ -226,11 +227,7 @@ fn execute(conn: &mut Connection, cmd: Cmd, device: &str) -> Vec<Evt> {
                 token,
                 err: "the note is no longer in the vault".to_owned(),
             }],
-            Ok(SaveOutcome::Conflict { disk_hash }) => vec![Evt::SaveConflict {
-                id,
-                token,
-                disk_hash,
-            }],
+            Ok(SaveOutcome::Conflict) => vec![Evt::SaveConflict { id, token }],
             Err(error) => vec![Evt::SaveFailed {
                 id,
                 token,
@@ -274,9 +271,7 @@ enum SaveOutcome {
     /// The id is not in the index: the file was deleted or renamed.
     Missing,
     /// The file changed on disk since it was opened.
-    Conflict {
-        disk_hash: u64,
-    },
+    Conflict,
 }
 
 fn save_note(
@@ -304,7 +299,7 @@ fn save_note(
             other => other?,
         };
         if disk_hash != base_hash {
-            return Ok(SaveOutcome::Conflict { disk_hash });
+            return Ok(SaveOutcome::Conflict);
         }
     }
 

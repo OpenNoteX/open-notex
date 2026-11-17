@@ -315,7 +315,6 @@ impl State {
             draft.saving = false;
             draft.conflict = None;
             draft.error = None;
-            draft.force = false;
             draft.since_save = 0.0;
         }
     }
@@ -379,12 +378,16 @@ impl State {
                 draft.saving = true;
                 draft.idle = 0.0;
                 draft.since_save = 0.0;
+                // Overwrite is the user's answer about one version of the file,
+                // not a standing permission: a later save, and a retry after a
+                // failed overwrite, asks the hash guard again.
+                let force = std::mem::take(&mut draft.force);
                 return Some(Action::Save(SaveRequest {
                     id: draft.id.clone(),
                     body: draft.edit.text.clone(),
                     base_hash: draft.base_hash,
                     token: draft.token,
-                    force: draft.force,
+                    force,
                 }));
             }
         }
@@ -619,6 +622,30 @@ mod tests {
         };
         assert_eq!(retry.body, "# Alpha\n\nmine\n");
         assert_eq!(retry.token, first.token, "the same edit, sent again");
+    }
+
+    #[test]
+    fn overwrite_is_one_save_not_a_standing_permission() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+        next_save(&mut state);
+        state.save_conflict("01A", "changed on disk");
+
+        state.request_overwrite();
+        let first = next_save(&mut state);
+        assert!(first.force, "the user chose to overwrite");
+
+        // That save fails, so the file on disk may have changed again since the
+        // user looked at it: the next attempt must ask the guard.
+        state.save_failed("01A", "io: the disk is full");
+        state.request_save();
+        let retry = next_save(&mut state);
+        assert!(
+            !retry.force,
+            "an overwrite covers the version the user saw, not every later one"
+        );
+        assert_eq!(retry.body, "# Alpha\n\nmine\n");
     }
 
     #[test]

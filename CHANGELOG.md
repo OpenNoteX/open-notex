@@ -86,6 +86,9 @@ All notable changes to this project. The format follows
 - Try again, `⌘S` and the Save button did nothing after a failed save: the
   refusal blocked every later attempt. Asking again now clears it, while a
   conflict still waits for Reload or Overwrite.
+- Overwrite stayed armed after a failed save, so the next save would clobber a
+  file that had changed again without asking. It now covers the version the
+  user saw, and the hash guard runs again after it.
 - Deleting a note's file while it was open reported `io: No such file or
   directory`; a save now says the note is no longer in the vault.
 - `DELETE FROM notes_fts WHERE item_id = ?` scanned the whole search table for

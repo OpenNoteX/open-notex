@@ -55,7 +55,7 @@ assert!(rt.state.tasks[0].done);
   save now; autosave fires after the idle delay and not before; text typed while
   a save is in flight stays dirty; a dirty switch waits for the ack; a conflict
   shows the banner, blocks the automatic retry and its Overwrite sends
-  `force: true`; a failed save keeps the text and Try again sends it again; the
+  `force: true` for that one save only; a failed save keeps the text and Try again sends it again; the
   list row carries a dirty dot, and a clean one does not. These assert `Action`s
   from `take_action()`; nothing in the test talks to a worker.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
