@@ -12,7 +12,7 @@ pub mod theme;
 
 pub use routes::Route;
 pub use shell::{on_key, view};
-pub use state::{Load, State};
+pub use state::{Load, NoteBody, NoteRow, State};
 
 pub const TITLE: &str = "openNoteX";
 pub const SIZE: (f32, f32) = (1120.0, 740.0);
@@ -36,6 +36,31 @@ pub const SCENES: &[Scene] = &[
     ("notes-empty", |s| {
         s.route = Route::Notes;
         s.load = Load::Ready;
+    }),
+    ("notes-list", |s| {
+        s.route = Route::Notes;
+        s.load = Load::Ready;
+        s.set_notes(vec![
+            NoteRow::new("01J8Z5M4Q3", "Launch checklist", &["launch", "work"]),
+            NoteRow::new("01J8Z5M4R7", "Reading list", &["books"]),
+            NoteRow::new("01J8Z5M4S1", "Weekly review", &["review", "work"]),
+        ]);
+        s.selected = Some("01J8Z5M4S1".to_owned());
+        s.body = NoteBody::Ready(
+            concat!(
+                "# Weekly review\n\n",
+                "A quiet week. The shell landed, and notes are files again.\n\n",
+                "## Done\n\n",
+                "- [x] Rune shell\n",
+                "- [x] Store worker\n",
+                "- [ ] Markdown preview\n\n",
+                "## Next\n\n",
+                "1. Watch the vault\n",
+                "2. Add search\n\n",
+                "> The vault stays readable in any editor.\n",
+            )
+            .to_owned(),
+        );
     }),
     ("projects-empty", |s| {
         s.route = Route::Projects;
