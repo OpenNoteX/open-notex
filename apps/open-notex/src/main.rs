@@ -1,15 +1,13 @@
 //! openNoteX: notes, tasks, habits and reminders in one local-first window.
 //!
-//! The binary owns the shell's lifetime and nothing else yet. The store, the
-//! vault watcher and the reminder timer arrive in M1 and M4; the seam they will
-//! use (`notex_store::StoreHandle`) already exists and is tested.
-//!
-//! Rune owns the command line: `--snap`, `--tree`, `--scene`, `--size`,
-//! `--scale` and `--theme` are its flags, so `cargo xtask snap` drives the same
-//! binary a person runs. `--vault` and `--route` are ours and arrive through
-//! `rune::extra_args`.
+//! The binary owns the window; `open_notex::setup` starts the store worker and
+//! `open_notex::poll` drains it. Rune owns the command line: `--snap`, `--tree`,
+//! `--scene`, `--size`, `--scale` and `--theme` are its flags, so `cargo xtask
+//! snap` drives the same binary a person runs. `--vault` and `--route` are ours
+//! and arrive through `rune::extra_args`.
 
 use notex_ui::{MIN_SIZE, SCENES, SIZE, State, TITLE, on_key, view};
+use open_notex::{poll, setup};
 use rune::{App, AppSpec, Chrome};
 
 fn main() {
@@ -24,6 +22,8 @@ fn main() {
     let spec = AppSpec {
         min_size: Some(MIN_SIZE),
         scenes: SCENES,
+        setup: Some(setup),
+        poll: Some(poll),
         on_key: Some(on_key),
         ..AppSpec::new(TITLE, SIZE, State::from_args, view)
     };
