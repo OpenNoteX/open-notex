@@ -25,6 +25,11 @@ preferences; each one protects a property of the app.
    exceeds one, fix it or change the budget in an explicit commit.
 10. **A user-visible feature lands with** a headless tree test, a snapshot scene,
     and a `CHANGELOG.md` entry.
+11. **A bug found while building a slice is fixed in that slice's PR.** No PR
+    ships a known loose end, and no follow-up issue stands in for a fix you can
+    make now: a broken path is fixed and tested before the PR is opened. When a
+    fix truly needs a later milestone, the PR body says why and `docs/PLAN.md`
+    records it, so it cannot be forgotten.
 
 ## Commands
 

@@ -58,10 +58,11 @@ pub enum Evt {
         title: String,
         tags: Vec<String>,
     },
+    /// The file is not the one the editor read. Nothing is written; the user
+    /// chooses to reload or to overwrite.
     SaveConflict {
         id: String,
         token: u64,
-        disk_hash: u64,
     },
     SaveFailed {
         id: String,
@@ -226,11 +227,7 @@ fn execute(conn: &mut Connection, cmd: Cmd, device: &str) -> Vec<Evt> {
                 token,
                 err: "the note is no longer in the vault".to_owned(),
             }],
-            Ok(SaveOutcome::Conflict { disk_hash }) => vec![Evt::SaveConflict {
-                id,
-                token,
-                disk_hash,
-            }],
+            Ok(SaveOutcome::Conflict) => vec![Evt::SaveConflict { id, token }],
             Err(error) => vec![Evt::SaveFailed {
                 id,
                 token,
@@ -274,9 +271,7 @@ enum SaveOutcome {
     /// The id is not in the index: the file was deleted or renamed.
     Missing,
     /// The file changed on disk since it was opened.
-    Conflict {
-        disk_hash: u64,
-    },
+    Conflict,
 }
 
 fn save_note(
@@ -294,13 +289,28 @@ fn save_note(
     // The file is the source of truth: if it moved under us, refuse to clobber
     // it. `force` is the user's explicit "overwrite" after a conflict.
     if !force {
-        let disk_hash = vault::file_hash(&path)?;
+        let disk_hash = match vault::file_hash(&path) {
+            // The file itself is gone, not just the index row: a deleted or
+            // renamed note, which the editor should hear as "no longer in the
+            // vault" rather than as an io error.
+            Err(vault::VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SaveOutcome::Missing);
+            }
+            other => other?,
+        };
         if disk_hash != base_hash {
-            return Ok(SaveOutcome::Conflict { disk_hash });
+            return Ok(SaveOutcome::Conflict);
         }
     }
 
-    vault::write_body(&path, body)?;
+    match vault::write_body(&path, body) {
+        Ok(()) => {}
+        // Removed between the check and the write.
+        Err(vault::VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SaveOutcome::Missing);
+        }
+        Err(error) => return Err(error.into()),
+    }
     let note = vault::read_note(&path)?;
     index::upsert_note(conn, &note.file, &note.body, now_ms(), device)?;
     Ok(SaveOutcome::Saved(note))
@@ -612,10 +622,15 @@ mod tests {
                 force: false,
             })
             .unwrap();
-        assert!(matches!(
-            wait(&handle, &rx).as_slice(),
-            [Evt::SaveFailed { token: 1, .. }]
-        ));
+        let saved = wait(&handle, &rx);
+        let [Evt::SaveFailed { token, err, .. }] = saved.as_slice() else {
+            panic!("expected a failed save, got {saved:?}");
+        };
+        assert_eq!(*token, 1);
+        assert!(
+            err.contains("no longer in the vault"),
+            "a deleted file reads as a missing note, not an io error: {err}"
+        );
 
         // An id the index never had is a typed failure, not a panic.
         handle

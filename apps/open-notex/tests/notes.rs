@@ -281,6 +281,58 @@ fn a_file_changed_under_the_editor_is_a_conflict_the_user_can_resolve() {
 }
 
 #[test]
+fn a_dirty_draft_is_written_when_the_window_closes() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+
+    rt.state
+        .draft
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text("# Grocery list\n\n- milk\n- bread\n");
+    rt.state.draft_touched();
+
+    // Closing does not wait for the idle delay: the draft goes out now.
+    assert!(
+        open_notex::flush_with(&mut rt.state, session.handle()),
+        "the close saved the draft"
+    );
+    assert!(!rt.state.draft.as_ref().unwrap().is_dirty());
+
+    let on_disk = fs::read_to_string(vault.join("grocery-list.md")).unwrap();
+    assert!(on_disk.contains("- bread"), "{on_disk}");
+    assert!(on_disk.contains("tags: [errands]"), "{on_disk}");
+}
+
+#[test]
+fn a_note_deleted_under_the_editor_fails_the_close_with_a_readable_reason() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 0);
+
+    fs::remove_file(vault.join("grocery-list.md")).unwrap();
+    rt.state
+        .draft
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text("# Grocery list\n\n- milk\n- lost\n");
+    rt.state.draft_touched();
+
+    assert!(
+        !open_notex::flush_with(&mut rt.state, session.handle()),
+        "the close reports that it could not write"
+    );
+    let draft = rt.state.draft.as_ref().unwrap();
+    assert!(draft.is_dirty(), "the text is still here to recover");
+    let error = draft.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("no longer in the vault"),
+        "not a raw io error: {error}"
+    );
+}
+
+#[test]
 fn a_missing_vault_is_explained_in_the_list_pane() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("not-here");

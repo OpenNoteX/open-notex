@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use notex_store::worker::{self, Cmd, Evt, Notify, StoreHandle, Worker};
 use notex_store::{StoreError, db};
-use notex_ui::{Action, DraftStatus, Load, NoteRow, State};
+use notex_ui::{Action, Load, NoteRow, State};
 use rune::{Tx, Waker};
 use thiserror::Error;
 
@@ -239,31 +239,86 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
     }
 }
 
+/// How long a close or a quit waits for a draft to reach the file.
+pub const FLUSH_WAIT: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// Close and quit hook: write a dirty draft and wait for the file, so closing
-/// the window never drops the last edit. Bounded, so a dead worker cannot hang
-/// the quit.
+/// the window never drops the last edit.
+///
+/// Rune cannot cancel a quit, so a draft the disk still refuses is kept in the
+/// recovery folder rather than disappearing with the process. Closing the window
+/// alone keeps it in memory, since the app stays alive (see `main`).
 pub fn flush(state: &mut State, _tx: &mut Tx) {
-    state.request_save();
     SESSION.with(|slot| {
         let session = slot.borrow();
         let Some(session) = session.as_ref() else {
             return;
         };
-        let handle = session.handle();
-        let mut waited = 0_u64;
-        loop {
-            pump(state, handle);
-            let saving = state
-                .draft
-                .as_ref()
-                .is_some_and(|draft| draft.status() == DraftStatus::Saving);
-            if !saving || waited >= 750 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            waited += 5;
+        if !flush_with(state, session.handle()) && rune::quitting() {
+            keep_draft(state);
         }
     });
+}
+
+/// Write a dirty draft and wait for the answer. True when the draft is clean (or
+/// there was none). Bounded, so a dead worker cannot hang the close, and split
+/// out from [`flush`] so a test can drive a session it owns.
+pub fn flush_with(state: &mut State, handle: &StoreHandle) -> bool {
+    // A switch queued behind the save must not run on the way out.
+    state.pending_open = None;
+    state.request_save();
+    let started = std::time::Instant::now();
+    loop {
+        pump(state, handle);
+        match &state.draft {
+            None => return true,
+            Some(draft) if !draft.is_dirty() => return true,
+            // A conflict or a refusal does not resolve by waiting.
+            Some(draft) if draft.conflict.is_some() || draft.error.is_some() => return false,
+            Some(_) => {}
+        }
+        if started.elapsed() >= FLUSH_WAIT {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Where drafts that could not be written are kept, outside the vault so the
+/// index never sees them.
+pub fn recovery_dir() -> PathBuf {
+    db_path()
+        .parent()
+        .map(|parent| parent.join("recovery"))
+        .unwrap_or_else(|| PathBuf::from("recovery"))
+}
+
+/// The last resort when the process is ending: the body, with the note's id so
+/// the file is a valid note if it is ever copied back into the vault.
+fn keep_draft(state: &State) {
+    let Some(draft) = &state.draft else {
+        return;
+    };
+    match keep_draft_in(&recovery_dir(), &draft.id, &draft.edit.text) {
+        Ok(path) => eprintln!(
+            "openNoteX: the last save failed; the draft is kept at {}",
+            path.display()
+        ),
+        Err(error) => {
+            eprintln!("openNoteX: the last save failed and the draft could not be kept: {error}")
+        }
+    }
+}
+
+fn keep_draft_in(dir: &Path, id: &str, body: &str) -> std::io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{id}-{stamp}.md"));
+    fs::write(&path, format!("---\nid: {id}\n---\n{body}"))?;
+    Ok(path)
 }
 
 /// The database lives with the app's other data, never in the vault (rule 8).
@@ -305,6 +360,19 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unwritable_draft_is_kept_as_a_valid_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = keep_draft_in(dir.path(), "01ARZ3NDEKTSV4RRFFQ69G5FAV", "# Kept\n\nmine\n")
+            .expect("the recovery file is written");
+
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(kept.contains("id: 01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{kept}");
+        assert!(kept.ends_with("# Kept\n\nmine\n"), "{kept}");
+        let (_, body) = notex_store::vault::parse_note_source(&kept).unwrap();
+        assert_eq!(body, "# Kept\n\nmine\n", "the body survives verbatim");
+    }
 
     #[test]
     fn the_database_is_not_in_the_default_vault() {

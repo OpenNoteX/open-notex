@@ -55,8 +55,9 @@ assert!(rt.state.tasks[0].done);
   save now; autosave fires after the idle delay and not before; text typed while
   a save is in flight stays dirty; a dirty switch waits for the ack; a conflict
   shows the banner, blocks the automatic retry and its Overwrite sends
-  `force: true`; a failed save keeps the text and offers Try again. These assert
-  `Action`s from `take_action()`; nothing in the test talks to a worker.
+  `force: true` for that one save only; a failed save keeps the text and Try again sends it again; the
+  list row carries a dirty dot, and a clean one does not. These assert `Action`s
+  from `take_action()`; nothing in the test talks to a worker.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -72,9 +73,11 @@ assert!(rt.state.tasks[0].done);
   reindex lists both notes, selecting one returns its body, clicking it again
   does not re-read the file, an edit passes the idle delay and the Markdown file
   changes on disk with its frontmatter intact, a file changed underneath the
-  editor is a conflict that leaves the other edit alone until Overwrite, a
-  missing vault becomes `Load::Failed`, and a database inside the vault is
-  refused.
+  editor is a conflict that leaves the other edit alone until Overwrite, the
+  close hook writes a dirty draft without waiting for the idle delay, a file
+  deleted under the editor fails the close with "no longer in the vault" and
+  keeps the text, a missing vault becomes `Load::Failed`, and a database inside
+  the vault is refused. A recovery file is written as a valid note with its id.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.

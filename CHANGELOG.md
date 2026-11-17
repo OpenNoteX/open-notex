@@ -18,6 +18,13 @@ All notable changes to this project. The format follows
   silent clobber; a failed write keeps the draft and offers Try again.
 - Selecting another note while the editor is dirty queues the switch behind the
   save, so typing is never dropped.
+- A dot on a note's list row while its editor holds unsaved text.
+- Closing the window keeps the app running, as on macOS, so an unsaved draft
+  survives a failed close-time save; the closed window releases its GPU memory
+  and reopening recreates it. `⌘Q` still quits.
+- A draft the disk refuses while the app is quitting is kept in
+  `~/Library/Application Support/openNoteX/recovery/` as a valid note with its
+  id, instead of disappearing with the process.
 - `notex-store`: `vault::write_body` (replaces a body and keeps frontmatter, so
   ids and tags survive an edit) and `vault::file_hash`.
 - `notex-store`: `Cmd::SaveNote { id, body, base_hash, token, force }` and
@@ -76,6 +83,14 @@ All notable changes to this project. The format follows
 
 ### Fixed
 
+- Try again, `⌘S` and the Save button did nothing after a failed save: the
+  refusal blocked every later attempt. Asking again now clears it, while a
+  conflict still waits for Reload or Overwrite.
+- Overwrite stayed armed after a failed save, so the next save would clobber a
+  file that had changed again without asking. It now covers the version the
+  user saw, and the hash guard runs again after it.
+- Deleting a note's file while it was open reported `io: No such file or
+  directory`; a save now says the note is no longer in the vault.
 - `DELETE FROM notes_fts WHERE item_id = ?` scanned the whole search table for
   every note (`item_id` is `UNINDEXED`), which made a 10k-note reindex
   quadratic. Migration `0002_fts_rowid` stores each note's FTS rowid and deletes

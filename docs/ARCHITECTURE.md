@@ -54,7 +54,7 @@ pub enum Evt {
     Pong, Indexed { count }, Notes(Vec<NoteSummary>),
     Opened { id, body, hash }, OpenFailed { id, err },
     Saved { id, token, hash, title, tags },
-    SaveConflict { id, token, disk_hash }, SaveFailed { id, token, err },
+    SaveConflict { id, token }, SaveFailed { id, token, err },
     Failed { op, err },
 }
 ```
@@ -133,11 +133,17 @@ The detail pane edits the Markdown file itself, frontmatter excluded, so the
   continuous run. `State::next_wake` tells `poll` when to sleep until; a clean or
   blocked draft schedules no wake, so an idle app stays idle.
 - A save with a stale base hash becomes a conflict banner with Reload and
-  Overwrite; autosave stops until the user chooses. A failed save keeps the
-  draft and offers Try again.
-- Selecting another note while dirty queues the open behind the save. `⌘S` and
-  the Save button mean "write now"; `on_close` and `on_quit` flush a dirty draft
-  and wait up to 750 ms for the file.
+  Overwrite; autosave stops until the user chooses. Overwrite is `force: true`
+  on one save, so a failed overwrite and any later save ask the guard again. A
+  failed save keeps the draft and offers Try again.
+- Selecting another note while dirty queues the open behind the save. `⌘S`, the
+  Save button and Retry mean "write now"; a refusal does not block a later
+  request, while a conflict waits for Reload or Overwrite.
+- Closing the window keeps the app and its state (`keep_running`), releasing the
+  GPU while it is closed; `⌘Q` ends the process. Both hooks flush a dirty draft
+  and wait up to 750 ms for the file. Rune cannot cancel a quit, so a draft the
+  disk still refuses is written to `~/Library/Application Support/openNoteX/
+  recovery/` as a note with its id, and the path goes to stderr.
 
 ## Time
 
