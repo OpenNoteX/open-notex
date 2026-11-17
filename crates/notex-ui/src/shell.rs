@@ -4,7 +4,9 @@
 //! mutate [`State`], and the next frame is the layout of that state.
 
 use rune::{Align, Cx, El, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
-use rune_kit::shell::{Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
+use rune_kit::shell::{
+    RowStatus, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar,
+};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
 
 use crate::routes::{FOOTER, Route, SECTIONS};
@@ -166,6 +168,7 @@ fn list_pane(s: &State, k: &Kit) -> El {
 
 /// The notes list: one row per Markdown file, alphabetical by title.
 fn note_list(s: &State, k: &Kit) -> El {
+    let c = &k.c;
     let rows: Vec<El> = s
         .notes
         .iter()
@@ -178,6 +181,20 @@ fn note_list(s: &State, k: &Kit) -> El {
                 .on_select(move |s: &mut State, _| s.select_note(&id));
             if !tags.is_empty() {
                 row = row.subtitle(tags);
+            }
+            // A dot on the row whose editor holds unsaved text, so a dirty note
+            // is visible without opening it.
+            if s.draft
+                .as_ref()
+                .is_some_and(|draft| draft.id == note.id && draft.is_dirty())
+            {
+                row = row.status(RowStatus::Other(
+                    el().key(format!("list-dirty-{}", note.id))
+                        .w(6.0)
+                        .h(6.0)
+                        .radius(3.0)
+                        .fill(c.text_muted),
+                ));
             }
             row.build(k).key(format!("list-note-{}", note.id))
         })

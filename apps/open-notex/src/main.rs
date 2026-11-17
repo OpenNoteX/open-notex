@@ -30,6 +30,11 @@ fn main() {
 
     App::new(spec)
         .chrome(chrome)
+        // Closing the red button keeps the app, its state and an unsaved draft
+        // alive, as every other Mac app does; ⌘Q still flushes through on_quit.
+        // A closed window holds no GPU memory.
+        .keep_running()
+        .release_gpu_when_closed()
         .on_close(flush)
         .on_quit(flush)
         .run();

@@ -270,8 +270,13 @@ impl State {
         }
     }
 
-    /// `⌘S`, the Save button, and the close hook.
+    /// `⌘S`, the Save button, Retry and the close hook. Asking again is a retry,
+    /// so a previous refusal does not block it; a conflict still waits for the
+    /// user's Reload or Overwrite.
     pub fn request_save(&mut self) {
+        if let Some(draft) = &mut self.draft {
+            draft.error = None;
+        }
         self.save_requested = true;
     }
 
@@ -589,6 +594,47 @@ mod tests {
         open_alpha(&mut state);
         state.select_note("01B");
         assert_eq!(state.take_action(), Some(Action::Open("01B".to_owned())));
+    }
+
+    #[test]
+    fn retry_after_a_failed_save_sends_the_draft_again() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+        let first = next_save(&mut state);
+        state.save_failed("01A", "io: the disk is full");
+        assert_eq!(state.draft.as_ref().unwrap().status(), DraftStatus::Failed);
+
+        state.tick(state.clock + 20.0);
+        assert!(
+            state.take_action().is_none(),
+            "a failure never retries itself"
+        );
+
+        // The Retry button, ⌘S and the close hook all ask again.
+        state.request_save();
+        let retry = match state.take_action() {
+            Some(Action::Save(request)) => request,
+            other => panic!("expected a retry, got {other:?}"),
+        };
+        assert_eq!(retry.body, "# Alpha\n\nmine\n");
+        assert_eq!(retry.token, first.token, "the same edit, sent again");
+    }
+
+    #[test]
+    fn asking_to_save_does_not_clear_a_conflict() {
+        let mut state = state_with_two_notes();
+        open_alpha(&mut state);
+        edit(&mut state, "# Alpha\n\nmine\n");
+        next_save(&mut state);
+        state.save_conflict("01A", "changed on disk");
+
+        state.request_save();
+        assert!(state.take_action().is_none(), "still waiting on the user");
+        assert_eq!(
+            state.draft.as_ref().unwrap().status(),
+            DraftStatus::Conflict
+        );
     }
 
     #[test]

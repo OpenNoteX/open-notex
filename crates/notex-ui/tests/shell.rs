@@ -330,6 +330,10 @@ fn an_open_note_shows_the_file_in_the_editor() {
     assert!(rt.find("detail-editor").is_some(), "the editor is mounted");
     assert_eq!(label_of(&rt, "detail-status-label"), "Saved");
     assert!(rt.find("save-note").is_none(), "nothing to save yet");
+    assert!(
+        rt.find("list-dirty-01A").is_none(),
+        "a clean note carries no dot"
+    );
     let text = &rt.state.draft.as_ref().unwrap().edit.text;
     assert!(text.starts_with("# Apple\n\nA crisp note"), "{text}");
 }
@@ -346,6 +350,10 @@ fn typing_marks_the_note_edited_and_offers_save() {
     assert!(rt.state.draft.as_ref().unwrap().is_dirty());
     assert_eq!(label_of(&rt, "detail-status-label"), "Edited");
     assert!(rt.find("save-note").is_some(), "an explicit save appears");
+    assert!(
+        rt.find("list-dirty-01A").is_some(),
+        "the row says it has unsaved text"
+    );
 
     click(&mut rt, "save-note");
     let action = rt.state.take_action().unwrap();
@@ -408,13 +416,13 @@ fn a_conflict_explains_itself_and_offers_two_ways_out() {
 }
 
 #[test]
-fn a_failed_save_keeps_the_draft_and_the_text() {
+fn a_failed_save_keeps_the_draft_and_retry_sends_it_again() {
     let mut state = notes_state();
     state.select_note("01A");
     state.show_body("01A", "# Apple\n\nMine.\n", 7);
     state.draft_touched();
     state.save_failed("01A", "io: the disk is full");
-    let rt = runtime(state);
+    let mut rt = runtime(state);
 
     assert_eq!(label_of(&rt, "detail-status-label"), "Not saved");
     assert!(rt.find("detail-save-failed").is_some());
@@ -422,6 +430,13 @@ fn a_failed_save_keeps_the_draft_and_the_text() {
     assert_eq!(
         rt.state.draft.as_ref().unwrap().edit.text,
         "# Apple\n\nMine.\n"
+    );
+
+    click(&mut rt, "save-retry");
+    let action = rt.state.take_action();
+    assert!(
+        matches!(action, Some(notex_ui::Action::Save(_))),
+        "Try again writes the same draft, got {action:?}"
     );
 }
 
