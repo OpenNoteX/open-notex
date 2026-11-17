@@ -101,14 +101,17 @@ fn seed(args: &[String]) -> Result<(), String> {
         let mut conn = db::open(&db_path).map_err(|error| error.to_string())?;
         let device = "xtask";
         let paths = vault::scan_paths(&dir).map_err(|error| error.to_string())?;
+        let mut batch =
+            index::Batch::new(&mut conn, now_ms(), device).map_err(|error| error.to_string())?;
         for path in &paths {
             let note = vault::read_note(path).map_err(|error| error.to_string())?;
-            index::upsert_note(&mut conn, &note.file, &note.body, now_ms(), device)
+            batch
+                .upsert(&note.file, &note.body)
                 .map_err(|error| error.to_string())?;
         }
+        let indexed = batch.commit().map_err(|error| error.to_string())?;
         println!(
-            "indexed {} notes into {} in {} ms",
-            paths.len(),
+            "indexed {indexed} notes into {} in {} ms",
             db_path.display(),
             started.elapsed().as_millis()
         );
