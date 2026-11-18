@@ -23,7 +23,7 @@ jobs:
     # resolve.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The commit count is CFBundleVersion, and a shallow clone has none.
           fetch-depth: 0
@@ -75,7 +75,7 @@ jobs:
         run: cd artifacts/dist && shasum -a 256 -c SHA256SUMS.txt
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openNoteX-dmg
           path: |
@@ -94,7 +94,8 @@ jobs:
         run: |
           notes=$(scripts/release-notes.sh "$GITHUB_REF_NAME")
           if [ -z "$notes" ]; then
-            notes="See CHANGELOG.md."
+            notes="No CHANGELOG section for this version: see \
+            [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)."
           fi
           {
             echo "$notes"
