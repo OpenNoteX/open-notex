@@ -4442,6 +4442,7 @@ dependencies = [
  "chrono",
  "notex-core",
  "notex-store",
+ "tempfile",
 ]
 
 [[package]]

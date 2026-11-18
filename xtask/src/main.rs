@@ -3,6 +3,10 @@
 //! `seed` and `bench` work on the store. `snap` drives the real app binary
 //! headlessly: Rune owns `--scene`, `--snap`, `--tree`, `--theme` and `--scale`,
 //! so the snapshots come from the same code path a person runs, not a copy of it.
+//! `bundle` turns a release build into a macOS app, the disk image people
+//! download, and the zip an update unpacks.
+
+mod bundle;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
@@ -22,6 +26,7 @@ fn main() -> ExitCode {
         "seed" => seed(&args[1..]),
         "bench" => bench(&args[1..]),
         "snap" => snap(&args[1..]),
+        "bundle" => bundle::run(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -48,9 +53,15 @@ fn usage() {
   cargo xtask seed --count N --dir PATH [--db PATH]
   cargo xtask bench --db PATH
   cargo xtask snap [--scene NAME] [--theme light|dark|both] [--scale N] [--out DIR]
+  cargo xtask bundle [--dmg] [--zip] [--check] [--bin PATH] [--out DIR] [--icon PATH] [--sign IDENTITY]
 
 `snap` renders every scene by default. Output: DIR/<scene>-<theme>-<scale>x.png
-plus the matching .tree.json."
+plus the matching .tree.json.
+
+`bundle` builds the release binary unless --bin names one, then writes
+DIR/OpenNoteX.app and, with the flags, DIR/openNoteX-<version>-arm64.{{dmg,zip}}
+plus SHA256SUMS.txt. Without --sign the bundle is ad-hoc signed. --check launches
+it with a temporary home and waits for its first window."
     );
 }
 

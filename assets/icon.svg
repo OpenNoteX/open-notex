@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- openNoteX. The source of `assets/icon.icns`; regenerate with
+       `scripts/make-icon.sh`. The palette is `crates/notex-ui/src/theme.rs`:
+       the teal accent, paper, and ink. -->
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E9683"/>
+      <stop offset="1" stop-color="#005D4D"/>
+    </linearGradient>
+    <filter id="lift" x="-12%" y="-12%" width="124%" height="128%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#00201B" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+
+  <!-- The plate: a macOS squircle inset from the canvas, so the Dock's own
+       shadow has room and the icon sits at the same weight as its neighbours. -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#ink)" filter="url(#lift)"/>
+
+  <!-- The note: a page of paper, off-white, on the teal. -->
+  <rect x="312" y="216" width="400" height="592" rx="40" fill="#FBFAF8"/>
+
+  <!-- The title rule, in the accent: the one line that names the note. -->
+  <rect x="368" y="304" width="288" height="40" rx="20" fill="#00826F"/>
+
+  <!-- Body lines, in ink, the last one short because a note stops where it does. -->
+  <rect x="368" y="420" width="288" height="32" rx="16" fill="#211F1B" opacity="0.30"/>
+  <rect x="368" y="504" width="288" height="32" rx="16" fill="#211F1B" opacity="0.30"/>
+  <rect x="368" y="588" width="184" height="32" rx="16" fill="#211F1B" opacity="0.30"/>
+</svg>
