@@ -111,3 +111,19 @@ people to run; nothing today depends on a stable signing identity.
 ID build, so M6b is a secrets change plus notarization, not a rewrite. *Reopen
 when* the account exists, which is also the condition for M6c (in-place update
 keeps permission grants only if the identity is stable).
+
+## 0014 — The update check is asked for, and it is one child process
+
+A notes app that phones home on launch is not local-first, so nothing leaves the
+machine until someone presses **Check now** in Settings. Then the app runs `curl`
+once against `api.github.com/repos/OpenNoteX/open-notex/releases/latest`, reads
+`tag_name`, and compares it with the version it was built with — numerically, in
+`notex_core::update`, because `0.10.0` is newer than `0.9.0` and a string compare
+hides every tenth minor release. No HTTP crate, no async runtime, no telemetry: a
+refused or failed check is a sentence in a row and the app is otherwise
+unchanged. `curl` and `open` (the release page) are the only child processes this
+process starts, both are on every macOS, and neither is a dependency in
+`Cargo.toml`. Drafts are invisible to the releases API, so an unpublished build
+is never offered to anyone. *Reopen when* M6c installs updates: that makes a
+check automatic enough to be useful, and a downloaded artifact has to be
+verified rather than handed to the browser.

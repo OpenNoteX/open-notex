@@ -769,6 +769,36 @@ fn empty_page(s: &State, k: &Kit) -> El {
 
 fn settings(s: &State, k: &Kit, dark: bool) -> El {
     let c = &k.c;
+    let mut panel = col().w_full().max_w(520.0).gap(10.0);
+
+    // A newer release goes first: it is news, and it belongs where the eye lands
+    // rather than below the version it is newer than.
+    if let Some(version) = s.update.offered() {
+        panel = panel.child(update_banner(version, k));
+    }
+
+    panel = panel
+        .child(text("Workspace").font(k.ty.ui_medium).color(c.text_base))
+        .child(setting_row(k, "Vault", &s.vault))
+        .child(setting_row(
+            k,
+            "Appearance",
+            if dark {
+                "Dark, following the system"
+            } else {
+                "Light, following the system"
+            },
+        ))
+        .child(setting_row(k, "Version", s.version))
+        .child(update_row(s, k))
+        .child(
+            text("Read-only for now. These become editable in Settings.")
+                .key("settings-note")
+                .font(k.ty.text_xsmall)
+                .color(c.text_faint)
+                .wrap(),
+        );
+
     col()
         .key("settings")
         .w_full()
@@ -776,30 +806,80 @@ fn settings(s: &State, k: &Kit, dark: bool) -> El {
         .min_h(0.0)
         .padding(32.0)
         .items_center()
+        .child(panel)
+}
+
+/// "openNoteX 0.1.0 is available", with the one thing a person can do about it.
+/// The app cannot install an update yet (that is M6c), so the button is honest
+/// about what it does: it opens the release page.
+fn update_banner(version: &str, k: &Kit) -> El {
+    let c = &k.c;
+    // The button outlives this frame, so it captures the version by value.
+    let target = version.to_owned();
+    let open = target.clone();
+    col()
+        .key("update-banner")
+        .w_full()
+        .padding(14.0)
+        .gap(6.0)
+        .radius(k.radius.md)
+        .fill(c.layer_02)
+        .border(1.0, c.border_weak)
         .child(
-            col()
-                .w_full()
-                .max_w(520.0)
-                .gap(10.0)
-                .child(text("Workspace").font(k.ty.ui_medium).color(c.text_base))
-                .child(setting_row(k, "Vault", &s.vault))
-                .child(setting_row(
-                    k,
-                    "Appearance",
-                    if dark {
-                        "Dark, following the system"
-                    } else {
-                        "Light, following the system"
-                    },
-                ))
-                .child(setting_row(k, "Version", s.version))
-                .child(
-                    text("Read-only for now. These become editable in Settings.")
-                        .key("settings-note")
-                        .font(k.ty.text_xsmall)
-                        .color(c.text_faint)
-                        .wrap(),
-                ),
+            text(format!("openNoteX {version} is available"))
+                .key("update-title")
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
+        )
+        .child(
+            text("This build keeps working. Updates install from the release page.")
+                .key("update-hint")
+                .font(k.ty.text_xsmall)
+                .color(c.text_muted)
+                .wrap(),
+        )
+        .child(
+            row().gap(8.0).child(
+                Button::new(format!("View openNoteX {target}"))
+                    .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut State| s.request_release(open.clone()))
+                    .build(k)
+                    .key("update-view"),
+            ),
+        )
+}
+
+/// The update check, as a setting: what it last said, and the button that asks.
+/// Nothing is asked on launch, which is why the default reads "Not checked".
+fn update_row(s: &State, k: &Kit) -> El {
+    let c = &k.c;
+    row()
+        .w_full()
+        .py(10.0)
+        .px(14.0)
+        .gap(12.0)
+        .radius(k.radius.md)
+        .fill(c.layer_01)
+        .border(1.0, c.border_weak)
+        .center_y()
+        .child(text("Updates").font(k.ty.ui).color(c.text_base))
+        .child(
+            text(s.update.summary())
+                .key("update-status")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .align(Align::End)
+                .truncate()
+                .grow(1.0),
+        )
+        .child(
+            Button::new("Check now")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.request_update_check())
+                .build(k)
+                .key("update-check"),
         )
 }
 

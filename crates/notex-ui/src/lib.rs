@@ -12,7 +12,7 @@ pub mod theme;
 
 pub use routes::Route;
 pub use shell::{on_key, view};
-pub use state::{Action, Draft, DraftStatus, Load, NoteBody, NoteRow, SaveRequest, State};
+pub use state::{Action, Draft, DraftStatus, Load, NoteBody, NoteRow, SaveRequest, State, Update};
 
 pub const TITLE: &str = "openNoteX";
 pub const SIZE: (f32, f32) = (1120.0, 740.0);
@@ -98,6 +98,11 @@ pub const SCENES: &[Scene] = &[
     }),
     ("settings", |s| {
         s.route = Route::Settings;
+    }),
+    ("settings-update", |s| {
+        s.route = Route::Settings;
+        s.load = Load::Ready;
+        s.update_available("0.1.0");
     }),
     ("search", |s| {
         s.route = Route::Search;

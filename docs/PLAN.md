@@ -1,14 +1,15 @@
 # Plan
 
 Status: `0.0.1` pre-alpha. M0 (context, workspace, store, time, CI), M0.5
-(the shell), M1a (the store behind the shell) and M1b (editing) are done.
-Create, delete and rename are in review with the rest of M1 — the vault watcher
-is what completes it — and M6a (a downloadable, launchable Mac app) is landing
+(the shell), M1a (the store behind the shell), M1b (editing) and M1's create,
+delete and rename are done; the vault watcher is what completes M1. M6a — a
+downloadable Mac app, the release pipeline and the update check — is landing
 ahead of the milestone order so the app can be installed and used.
 
 One app, four primitives: **capture (notes) → plan (tasks) → repeat (habits) →
 remember (reminders)**. SQLite and a Markdown vault are the source of truth.
-Rune renders. No network in v1.
+Rune renders. No network unless a person asks for it: one check for a newer
+release (decision 0014).
 
 ## Milestones
 
