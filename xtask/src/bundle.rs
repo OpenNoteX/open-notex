@@ -546,8 +546,8 @@ fn build_release() -> Result<(), String> {
     let status = Command::new(cargo)
         .args(["build", "--release", "--quiet", "-p", "open-notex"])
         // `--version` names the commit, so even a bundle made here says what it
-        // is. The release workflow stamps the same variable.
-        .env("NOTEX_REVISION", revision())
+        // is. The release workflow sets the same variable for the tag it built.
+        .env("NOTEX_REVISION", stamped_revision())
         .current_dir(workspace_root()?)
         .status()
         .map_err(|error| format!("could not run cargo: {error}"))?;
@@ -555,6 +555,16 @@ fn build_release() -> Result<(), String> {
         return Err("cargo build --release -p open-notex failed".to_owned());
     }
     Ok(())
+}
+
+/// The revision to stamp into the binary: the release workflow's value when it
+/// set one, otherwise this checkout's commit.
+fn stamped_revision() -> String {
+    std::env::var("NOTEX_REVISION")
+        .ok()
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| !revision.is_empty())
+        .unwrap_or_else(revision)
 }
 
 /// The commit a build came from, or `dev` outside a checkout.
