@@ -224,6 +224,26 @@ fn bench(args: &[String]) -> Result<(), String> {
             "reindex: {count} notes in {} ms (one transaction)",
             started.elapsed().as_millis()
         );
+
+        // The watcher's quiet pass: a walk and a `stat` per file, no note read.
+        // This is what the worker pays every couple of seconds while a vault is
+        // open, so it has to stay far below the interval.
+        let mut passes: Vec<Duration> = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let sync = index::sync_vault(&mut conn, &vault_dir, now_ms(), "bench")
+                .map_err(|error| error.to_string())?;
+            assert!(!sync.changed, "the vault did not move during the benchmark");
+            passes.push(started.elapsed());
+        }
+        passes.sort();
+        let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
+        println!(
+            "watch: quiet pass median {:.1} ms, p95 {:.1} ms over {} notes",
+            ms(&passes[passes.len() / 2]),
+            ms(&passes[passes.len() * 95 / 100]),
+            count
+        );
     }
 
     let size = std::fs::metadata(&db_path)

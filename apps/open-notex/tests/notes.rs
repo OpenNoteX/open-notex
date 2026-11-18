@@ -473,3 +473,94 @@ fn a_database_inside_the_vault_is_refused() {
     assert!(error.contains("vault"), "{error}");
     assert!(matches!(state.load, Load::Failed(_)));
 }
+
+/// Edit a file the way another editor would: the frontmatter stays, the text
+/// changes.
+fn rewrite(path: &std::path::Path, from: &str, to: &str) {
+    let source = fs::read_to_string(path).unwrap();
+    assert!(source.contains(from), "the file holds {from:?}: {source}");
+    fs::write(path, source.replacen(from, to, 1)).unwrap();
+}
+
+/// A file written by another program, while the app is open. The worker looks
+/// at the vault on its own timer, so nothing here tells it to.
+#[test]
+fn an_edit_in_another_editor_reaches_the_editor_and_the_list() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 1);
+    assert!(
+        rt.state
+            .draft
+            .as_ref()
+            .unwrap()
+            .edit
+            .text
+            .contains("launch plan")
+    );
+
+    // An editor keeps the frontmatter: the `id` is what makes this the same
+    // note. Only the text changes.
+    rewrite(
+        &vault.join("weekly-review.md"),
+        "Weekly review",
+        "Weekly plan",
+    );
+    rewrite(
+        &vault.join("weekly-review.md"),
+        "The launch plan is written down.",
+        "Rewritten outside the app.",
+    );
+
+    settle(&mut rt, &session, "the note re-read from disk", |state| {
+        state
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.edit.text.contains("Rewritten outside"))
+    });
+
+    // The title in the file is the title in the list: no save happened here.
+    assert_eq!(label_of(&rt, "detail-title"), "Weekly plan");
+    assert!(
+        rt.state
+            .notes
+            .iter()
+            .any(|note| note.title == "Weekly plan"),
+        "the row was re-read too: {:?}",
+        rt.state
+            .notes
+            .iter()
+            .map(|note| &note.title)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_note_created_in_another_editor_appears_in_the_list() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    fs::write(
+        vault.join("later.md"),
+        "# Later thought\n\nWritten elsewhere.\n",
+    )
+    .unwrap();
+
+    settle(&mut rt, &session, "the new note", |state| {
+        state.notes.iter().any(|note| note.title == "Later thought")
+    });
+    assert_eq!(label_of(&rt, "list-subtitle"), "3 notes");
+}
+
+#[test]
+fn a_note_deleted_in_another_editor_leaves_the_list_and_the_editor() {
+    let (mut rt, session, _dir, vault) = open_vault();
+    open_note(&mut rt, &session, 1);
+    assert!(rt.state.draft.is_some());
+
+    fs::remove_file(vault.join("weekly-review.md")).unwrap();
+
+    settle(&mut rt, &session, "the note to leave", |state| {
+        state.notes.len() == 1
+    });
+    assert_eq!(rt.state.selected, None, "the selection went with it");
+    assert_eq!(rt.state.body, NoteBody::None);
+    assert!(rt.state.draft.is_none(), "the editor closes");
+}

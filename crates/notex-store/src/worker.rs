@@ -5,9 +5,10 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use notex_core::ItemId;
@@ -16,6 +17,11 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::db::{self, StoreError};
 use crate::index;
 use crate::vault::{self, Note};
+
+/// How often the worker looks for edits made outside the app. Long enough that
+/// a quiet vault costs one walk per two seconds, short enough that saving in
+/// another editor feels like it happened.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -46,6 +52,10 @@ pub enum Cmd {
     DeleteNote {
         id: String,
     },
+    /// Look at the vault for files changed since the last pass, and index what
+    /// moved. The worker sends one of these on a timer; it is also a command so
+    /// a test can ask for a pass instead of waiting for one.
+    SyncVault,
     /// The list pane's read model.
     ListNotes,
     /// Read one note's body from its file (never from SQLite).
@@ -60,6 +70,12 @@ pub enum Evt {
     Pong,
     Indexed {
         count: u64,
+    },
+    /// The vault moved underneath us: a file was added, edited, renamed or
+    /// deleted by another program. The index is up to date again; `notes` are
+    /// the ids whose text changed, so an editor showing one can re-read it.
+    Synced {
+        notes: Vec<String>,
     },
     Saved {
         id: String,
@@ -218,9 +234,30 @@ fn run(
         .map(|parent| parent.join("trash"))
         .unwrap_or_else(|| PathBuf::from("trash"));
 
-    while let Ok(cmd) = rx.recv() {
+    // Edits made outside the app arrive no other way. There is no filesystem
+    // watcher crate in the tree, and this thread already owns the index, so it
+    // looks at the vault between commands rather than starting a second thread.
+    // The deadline is absolute: autosaves arrive every second or two while
+    // someone types, and a plain `recv_timeout` would be reset by each one and
+    // never fire.
+    let mut next_watch = Instant::now() + WATCH_EVERY;
+    loop {
+        let wait = if vault_root.is_some() {
+            next_watch.saturating_duration_since(Instant::now())
+        } else {
+            // No vault yet, so nothing to look at.
+            Duration::from_secs(3_600)
+        };
+        let cmd = match rx.recv_timeout(wait) {
+            Ok(cmd) => cmd,
+            Err(RecvTimeoutError::Timeout) => Cmd::SyncVault,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         if matches!(cmd, Cmd::Shutdown) {
             break;
+        }
+        if matches!(cmd, Cmd::SyncVault) {
+            next_watch = Instant::now() + WATCH_EVERY;
         }
         for event in execute(&mut conn, cmd, &device, &mut vault_root, &trash) {
             publish(&inbox, notify.as_ref(), event);
@@ -300,6 +337,24 @@ fn execute(
                 err: error.to_string(),
             }],
         },
+        Cmd::SyncVault => {
+            let Some(root) = vault_root.as_deref() else {
+                return Vec::new();
+            };
+            match index::sync_vault(conn, root, now_ms(), device) {
+                Ok(sync) if sync.changed => vec![Evt::Synced { notes: sync.notes }],
+                // The vault matched the index: nothing happened, so nothing is
+                // published and no frame is drawn.
+                Ok(_) => Vec::new(),
+                // A pass that could not read the vault is tried again on the
+                // next tick. Reporting it as a load failure would replace the
+                // list with an error because a file was momentarily missing.
+                Err(error) => {
+                    eprintln!("openNoteX: watching the vault: {error}");
+                    Vec::new()
+                }
+            }
+        }
         Cmd::ListNotes => match index::notes(conn) {
             Ok(notes) => vec![Evt::Notes(notes)],
             Err(error) => vec![Evt::Failed {
@@ -641,6 +696,151 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].id, id);
         assert_eq!(notes[0].path, moved);
+    }
+
+    /// The worker's own timer is what a person relies on: no command, just a
+    /// file changing under the app.
+    #[test]
+    fn the_worker_notices_an_outside_edit_without_being_asked() {
+        let vault = open_vault(&[("weekly.md", "# Weekly review\n\nold body\n")]);
+
+        fs::write(
+            vault.path().join("weekly.md"),
+            "# Weekly review\n\nwritten in another editor\n",
+        )
+        .unwrap();
+
+        let events = vault.wait();
+        assert!(
+            matches!(events.as_slice(), [Evt::Synced { .. }]),
+            "expected a sync, got {events:?}"
+        );
+        let id = vault.listed()[0].id.clone();
+        vault.handle.send(Cmd::OpenNote { id }).unwrap();
+        let body = match vault.wait().pop() {
+            Some(Evt::Opened { body, .. }) => body,
+            other => panic!("expected the body, got {other:?}"),
+        };
+        assert!(body.contains("written in another editor"), "{body}");
+    }
+
+    #[test]
+    fn a_pass_reports_the_notes_it_re_read_and_leaves_a_quiet_vault_alone() {
+        let vault = open_vault(&[
+            (
+                "a.md",
+                "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n---\n# Apple\n\nred\n",
+            ),
+            ("b.md", "# Banana\n\nyellow\n"),
+        ]);
+        let apple = "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned();
+
+        // Nothing changed: no event, so no frame is drawn.
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            vault.handle.drain().is_empty(),
+            "a quiet vault says nothing"
+        );
+
+        // The same note, edited by another program. The frontmatter is what
+        // makes it the same note; an editor that keeps it keeps the id.
+        fs::write(
+            vault.path().join("a.md"),
+            "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n---\n# Apple\n\ngreen\n",
+        )
+        .unwrap();
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        let events = vault.wait();
+        assert_eq!(
+            events,
+            vec![Evt::Synced {
+                notes: vec![apple.clone()]
+            }],
+            "only the note that changed is named"
+        );
+
+        let notes = vault.listed();
+        assert_eq!(notes.len(), 2);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.id == apple && note.title == "Apple")
+        );
+    }
+
+    #[test]
+    fn a_note_renamed_outside_the_app_keeps_its_id_and_its_row_moves() {
+        let vault = open_vault(&[(
+            "a.md",
+            "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n---\n# Apple\n\nred\n",
+        )]);
+        fs::rename(
+            vault.path().join("a.md"),
+            vault.path().join("apple-renamed.md"),
+        )
+        .unwrap();
+
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        // The text did not change, so there is nothing for an editor to re-read,
+        // but the pass still ran and the row moved.
+        assert!(matches!(vault.wait().as_slice(), [Evt::Synced { notes }] if notes.is_empty()));
+
+        let notes = vault.listed();
+        assert_eq!(notes.len(), 1, "one note, not two");
+        assert_eq!(notes[0].id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(notes[0].path, vault.path().join("apple-renamed.md"));
+    }
+
+    #[test]
+    fn a_file_added_outside_the_app_appears_with_its_tags() {
+        let vault = open_vault(&[("a.md", "# Apple\n\nred\n")]);
+        fs::write(
+            vault.path().join("b.md"),
+            "---\ntags: [errands]\n---\n# Banana\n\nyellow\n",
+        )
+        .unwrap();
+
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        let events = vault.wait();
+        assert!(matches!(events.as_slice(), [Evt::Synced { notes }] if notes.len() == 1));
+
+        let notes = vault.listed();
+        assert_eq!(notes.len(), 2);
+        let banana = notes.iter().find(|note| note.title == "Banana").unwrap();
+        assert_eq!(banana.tags, vec!["errands"], "frontmatter was read");
+    }
+
+    #[test]
+    fn a_file_deleted_outside_the_app_leaves_the_list() {
+        let vault = open_vault(&[
+            ("a.md", "# Apple\n\nred\n"),
+            ("b.md", "# Banana\n\nyellow\n"),
+        ]);
+        fs::remove_file(vault.path().join("b.md")).unwrap();
+
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        // Nothing to re-read in an editor: the note is gone.
+        assert!(matches!(vault.wait().as_slice(), [Evt::Synced { notes }] if notes.is_empty()));
+
+        let notes = vault.listed();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Apple");
+    }
+
+    #[test]
+    fn a_vault_that_is_not_there_does_not_empty_the_index() {
+        let vault = open_vault(&[("a.md", "# Apple\n\nred\n")]);
+        // An unmounted drive or a moved folder. Every note is not deleted.
+        fs::remove_dir_all(vault.path()).unwrap();
+
+        vault.handle.send(Cmd::SyncVault).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            vault.handle.drain().is_empty(),
+            "a missing vault is not an empty one"
+        );
+        assert_eq!(vault.listed().len(), 1, "the index survives");
     }
 
     #[test]

@@ -129,8 +129,20 @@ changed, so an idle app draws nothing.
   are no different: they wait behind a dirty draft's save like a row switch, and
   a refused save drops them rather than taking the text with it. Delete asks in a
   dialog first, because the file leaves the vault.
+- The vault is watched from the same worker, not a second thread: `run` waits on
+  the command channel with an absolute deadline and sends itself `SyncVault`
+  every two seconds while a vault is open. A pass compares the walk (`path`,
+  `mtime_ns`, `size`) with `note_index` and reads no note when they match; only a
+  vault that actually moved is opened and reindexed. `Evt::Synced` names the
+  notes whose text changed, `poll` re-reads an open note if its draft has nothing
+  unsaved, and a dirty draft is left alone — its save reports the conflict, so
+  nothing typed is thrown away. A vault that is not there is not a vault every
+  note was deleted from: the pass does nothing and the index survives.
 - A missing vault, a failed reindex or a database inside the vault becomes
-  `Load::Failed` with a dismissible message; the window still opens.
+  `Load::Failed` with a dismissible message; the window still opens. A watcher
+  pass that cannot read the vault is not one of these: it retries on the next
+  tick, because replacing the list with an error while a file is being written
+  would be worse than a pass that arrives two seconds late.
 - Headless runs (`--snap`, `--scene`, the headless tests) skip `setup` entirely,
   so a snapshot never reads a real vault and `xtask snap` stays deterministic.
   The integration tests own a `Session` directly and drive `pump()` against a

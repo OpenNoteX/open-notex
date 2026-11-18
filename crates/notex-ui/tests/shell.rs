@@ -629,3 +629,53 @@ fn a_note_that_left_the_list_clears_the_selection() {
     assert!(state.draft.is_none(), "the editor goes with it");
     assert_eq!(state.pending_open, None, "the stale read is dropped too");
 }
+
+#[test]
+fn a_note_changed_on_disk_is_re_read_unless_the_draft_is_dirty() {
+    // Another program saved the file and the editor has nothing unsaved: show
+    // what is on disk now.
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nfrom the file\n", 7);
+    assert!(state.refresh_from_disk(&["01A".to_owned()]));
+    assert_eq!(
+        state.take_action(),
+        Some(notex_ui::Action::Open("01A".to_owned())),
+        "the file is read again"
+    );
+
+    // The same change with unsaved text in the editor: nothing is taken away.
+    // The next save reports the conflict and the person chooses.
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nmine\n", 7);
+    state.draft_touched();
+    assert!(!state.refresh_from_disk(&["01A".to_owned()]));
+    assert!(
+        state
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.edit.text.contains("mine")),
+        "the draft is untouched"
+    );
+    assert_eq!(state.take_action(), None, "no read goes out");
+
+    // A different note moving is not this editor's business.
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nmine\n", 7);
+    assert!(!state.refresh_from_disk(&["01B".to_owned()]));
+    assert_eq!(state.take_action(), None);
+}
+
+#[test]
+fn a_conflict_banner_is_not_replaced_by_a_quiet_reload() {
+    // The banner is the person's decision. A background re-read would erase the
+    // message before they answered it.
+    let mut state = notes_state();
+    state.select_note("01A");
+    state.show_body("01A", "# Apple\n\nmine\n", 7);
+    state.save_conflict("01A", "This file changed on disk since you opened it.");
+    assert!(!state.refresh_from_disk(&["01A".to_owned()]));
+    assert!(state.draft.as_ref().unwrap().conflict.is_some());
+}

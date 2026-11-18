@@ -14,6 +14,11 @@ All notable changes to this project. The format follows
   check is a `curl` started when pressed — and a failed check is a sentence in
   the row, not an error state. Comparison is numeric, so `0.10.0` is newer than
   `0.9.0`.
+- Watching the vault: an edit made in another editor shows up in the app within
+  two seconds — the open note is re-read, and a changed `# Title`, tags or a new
+  or deleted file reaches the list. A draft with unsaved text is never thrown
+  away by this: its next save reports the conflict, as before. The pass reads no
+  note and costs nothing when the vault has not moved.
 - Creating: `⌘N` and a plus in the note list write a real Markdown file with a
   fresh id and `# Untitled`, then open it. A title already in use gets `-2`.
 - Deleting: `⌘⌫` and the trash button in the detail pane, confirmed in a dialog.

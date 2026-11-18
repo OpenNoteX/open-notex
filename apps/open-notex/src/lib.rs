@@ -257,6 +257,14 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
             let _ = handle.send(Cmd::ListNotes);
             false
         }
+        // Another program changed the vault. The index is caught up, so the
+        // list is re-asked for, and an open note is re-read unless the draft has
+        // something unsaved in it.
+        Evt::Synced { notes } => {
+            let _ = handle.send(Cmd::ListNotes);
+            state.refresh_from_disk(&notes);
+            true
+        }
         Evt::Notes(notes) => {
             state.set_notes(
                 notes
