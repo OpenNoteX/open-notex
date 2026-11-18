@@ -1,8 +1,10 @@
 # Plan
 
 Status: `0.0.1` pre-alpha. M0 (context, workspace, store, time, CI), M0.5
-(the shell), M1a (the store behind the shell) and M1b (editing) are done; the
-rest of M1 — create, delete and the vault watcher — is next.
+(the shell), M1a (the store behind the shell) and M1b (editing) are done.
+Create, delete and rename are in review with the rest of M1 — the vault watcher
+is what completes it — and M6a (a downloadable, launchable Mac app) is landing
+ahead of the milestone order so the app can be installed and used.
 
 One app, four primitives: **capture (notes) → plan (tasks) → repeat (habits) →
 remember (reminders)**. SQLite and a Markdown vault are the source of truth.
@@ -21,7 +23,9 @@ Rune renders. No network in v1.
 | M3 | Habits, streak engine, heatmap, freezes, at-risk states | Property tests across four timezones; hand-checked streak cases |
 | M4 | Reminders, scheduler, notifications, tray, single instance, quick capture, snooze, click-through | Reminder fires with the window hidden; click focuses the item; missed-while-away digest |
 | M5 | Undo, structured-data export/import, backups, settings, accessibility pass, onboarding | Export → fresh install → import round-trips |
-| M6 | Packaging, signing, notarization, updater, release CI | Signed `.dmg` installs and updates on a clean Mac |
+| M6a | Packaging: `cargo xtask bundle`, release CI, installer, update check | A `.dmg` from Releases installs and launches on a clean Mac; the app names a newer release |
+| M6b | Signing: Developer ID, hardened runtime, `notarytool`, stapling, `spctl` gate | The download opens with no detour, and an update keeps its permission grants. **Blocked on a paid Apple Developer account** |
+| M6c | Updating: download, verify, swap in place, relaunch, roll back | An installed app updates itself from a release and a failed swap restores the old bundle. After M6b |
 | M7 | Optional sync on the oplog, web build, mobile, ICS | — |
 
 Private alpha after M4 (~7–8 focused weeks). Public 1.0 after M6.

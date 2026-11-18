@@ -1,0 +1,123 @@
+name: release
+
+# Tagging is the release act. CI builds the artifact, checks that it launches,
+# and publishes a draft; a person installs that draft before it goes public.
+on:
+  push:
+    tags: ["v*"]
+  # A manual run builds and checks the artifacts without publishing anything.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: release (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit count is CFBundleVersion, and a shallow clone has none.
+          fetch-depth: 0
+
+      # The release is Apple Silicon only. A runner that changed architecture
+      # would otherwise publish an x86_64 build under an arm64 name, and the
+      # bundler would refuse it too late to be a useful error.
+      - name: The runner is arm64
+        run: |
+          arch=$(uname -m)
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::expected an arm64 runner, got $arch"
+            exit 1
+          fi
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      # A release named differently from the crate is a bug that only shows up
+      # after people have downloaded it, so the tag has to agree.
+      - name: The tag names this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(cargo xtask version)
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml ($version); bump the version in its own commit, then tag"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Bundle
+        run: |
+          export NOTEX_REVISION=${GITHUB_SHA::7}
+          cargo xtask bundle --dmg --zip --check --out artifacts/dist
+
+      # `--check` proves the build tree launches; this proves the file people
+      # download does, after a mount and a copy, like a first install.
+      - name: Install from the disk image
+        run: scripts/release-smoke.sh artifacts/dist/openNoteX-*-arm64.dmg
+
+      - name: Checksums still match after the build
+        run: cd artifacts/dist && shasum -a 256 -c SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openNoteX-dmg
+          path: |
+            artifacts/dist/*.dmg
+            artifacts/dist/*.zip
+            artifacts/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      # A published release is hard to take back; a draft can be installed from
+      # first. The notes are the CHANGELOG section for this version.
+      - name: Draft the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(scripts/release-notes.sh "$GITHUB_REF_NAME")
+          if [ -z "$notes" ]; then
+            notes="See CHANGELOG.md."
+          fi
+          {
+            echo "$notes"
+            echo
+            echo "### Install"
+            echo
+            echo '```sh'
+            echo "curl -fsSLO https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh"
+            echo "sh install.sh ${VERSION}"
+            echo '```'
+            echo
+            echo "The app is ad-hoc signed (no Apple Developer account yet), so the"
+            echo "installer clears the download quarantine flag for you: that is the"
+            echo "one thing macOS would otherwise ask you to do in System Settings."
+            echo
+            echo "SHA-256:"
+            echo
+            echo '```'
+            cat artifacts/dist/SHA256SUMS.txt
+            echo '```'
+          } > notes.md
+
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "openNoteX $VERSION" \
+            --notes-file notes.md \
+            artifacts/dist/*.dmg \
+            artifacts/dist/*.zip \
+            artifacts/dist/SHA256SUMS.txt \
+            scripts/install.sh

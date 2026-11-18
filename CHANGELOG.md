@@ -96,6 +96,19 @@ All notable changes to this project. The format follows
   a vault or a GPU exist; the release workflow stamps the revision.
 - `assets/icon.svg` and `scripts/make-icon.sh`: one vector source, and the
   `.iconset`/`.icns` built from it rather than exported by hand.
+- Release workflow: tagging `v*` builds the arm64 bundle, refuses a tag that
+  disagrees with the workspace version or a runner that is not arm64, launches
+  the build, installs it from the disk image and launches that too, then
+  publishes a **draft** release with the `.dmg`, the `.zip`, `SHA256SUMS.txt`
+  and `scripts/install.sh`.
+- `scripts/install.sh`: one command installs or updates openNoteX — verifies the
+  download against the release checksums, quits a running copy, swaps the bundle
+  with two renames on one volume, restores it if the swap fails, clears the
+  quarantine flag and opens the app.
+- `docs/RELEASING.md`: cutting a release, verifying the draft, and what ad-hoc
+  signing means for the person installing it. `docs/PLAN.md` splits M6 into
+  M6a (this), M6b (signing and notarization, blocked on an Apple Developer
+  account) and M6c (in-place updates, after M6b).
 
 ### Changed
 

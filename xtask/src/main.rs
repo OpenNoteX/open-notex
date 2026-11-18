@@ -27,6 +27,12 @@ fn main() -> ExitCode {
         "bench" => bench(&args[1..]),
         "snap" => snap(&args[1..]),
         "bundle" => bundle::run(&args[1..]),
+        // The version a release is named after, from the one place that has it.
+        // The release workflow refuses a tag that disagrees with this.
+        "version" => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -54,6 +60,7 @@ fn usage() {
   cargo xtask bench --db PATH
   cargo xtask snap [--scene NAME] [--theme light|dark|both] [--scale N] [--out DIR]
   cargo xtask bundle [--dmg] [--zip] [--check] [--bin PATH] [--out DIR] [--icon PATH] [--sign IDENTITY]
+  cargo xtask version
 
 `snap` renders every scene by default. Output: DIR/<scene>-<theme>-<scale>x.png
 plus the matching .tree.json.
