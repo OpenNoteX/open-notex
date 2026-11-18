@@ -118,11 +118,43 @@ jobs:
             echo '```'
           } > notes.md
 
-          gh release create "$GITHUB_REF_NAME" \
-            --draft \
-            --title "openNoteX $VERSION" \
-            --notes-file notes.md \
-            artifacts/dist/*.dmg \
-            artifacts/dist/*.zip \
-            artifacts/dist/SHA256SUMS.txt \
+          assets=(
+            artifacts/dist/*.dmg
+            artifacts/dist/*.zip
+            artifacts/dist/SHA256SUMS.txt
             scripts/install.sh
+          )
+
+          # A tag can be re-pushed after a fix, and the tag is the same tag. A
+          # second `gh release create` does not update the first draft: it makes
+          # another release for the same tag, leaving the stale one to be
+          # published by mistake. So an existing draft is updated in place, and
+          # a published release is never touched — that is a new version.
+          if ! state=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>view.err); then
+            if ! grep -qi "not found" view.err; then
+              cat view.err >&2
+              exit 1
+            fi
+            state=missing
+          fi
+
+          case "$state" in
+            true)
+              echo "updating the existing draft for $GITHUB_REF_NAME"
+              gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+              gh release edit "$GITHUB_REF_NAME" \
+                --title "openNoteX $VERSION" \
+                --notes-file notes.md
+              ;;
+            false)
+              echo "::error::$GITHUB_REF_NAME is already published; a re-tag would replace a release people have downloaded. Cut a new version."
+              exit 1
+              ;;
+            *)
+              gh release create "$GITHUB_REF_NAME" \
+                --draft \
+                --title "openNoteX $VERSION" \
+                --notes-file notes.md \
+                "${assets[@]}"
+              ;;
+          esac
