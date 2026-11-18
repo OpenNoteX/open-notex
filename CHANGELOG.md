@@ -85,6 +85,17 @@ All notable changes to this project. The format follows
   replacement.
 - `xtask seed` to generate a fixture vault and database.
 - CI: formatting, clippy with `-D warnings`, and the workspace test suite.
+- Packaging: `cargo xtask bundle` writes `OpenNoteX.app` — icon, `Info.plist`
+  with the workspace version, ad-hoc signed — and, with `--dmg --zip`,
+  `openNoteX-<version>-arm64.dmg` (drag to Applications), a `.zip` for updates
+  and `SHA256SUMS.txt`. A binary built for anything but arm64 is refused with
+  the command that fixes it, rather than shipped and failing to launch, and
+  `--check` launches the bundle with a home of its own and waits for its first
+  window.
+- `--version` prints `openNoteX 0.1.0 (<revision>)` and exits before a window,
+  a vault or a GPU exist; the release workflow stamps the revision.
+- `assets/icon.svg` and `scripts/make-icon.sh`: one vector source, and the
+  `.iconset`/`.icns` built from it rather than exported by hand.
 
 ### Changed
 
