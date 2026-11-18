@@ -127,3 +127,19 @@ process starts, both are on every macOS, and neither is a dependency in
 is never offered to anyone. *Reopen when* M6c installs updates: that makes a
 check automatic enough to be useful, and a downloaded artifact has to be
 verified rather than handed to the browser.
+## 0015 — The vault is watched by polling the worker, not by FSEvents
+
+External edits have to reach the index, and macOS has FSEvents for exactly that.
+It is not used here: FSEvents needs `libc` calls and `unsafe` (which this
+workspace forbids) or a watcher crate, and a crate is a dependency with a
+maintenance cost for a feature that is one metadata comparison. So the worker,
+which already owns the index and the vault path, looks at the tree on an absolute
+two-second deadline: a walk and a `stat` per file, compared with `path`,
+`mtime_ns` and `size` in `note_index`. A quiet vault reads nothing and publishes
+nothing; a vault that moved is reindexed in the same transaction as before. 36 ms
+per pass at 10k notes, on the worker thread, is the price (see
+`PERFORMANCE.md`). The trade is latency for a dependency: an outside edit shows
+up within two seconds, not within milliseconds, and the app wakes at most twice a
+second while a vault is open. *Reopen when* the filesystem is the bottleneck —
+a 50k vault, or a pass that competes with a save — at which point FSEvents earns
+its dependency and its `unsafe` exemption.

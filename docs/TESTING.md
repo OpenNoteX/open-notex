@@ -39,6 +39,12 @@ only for wiring and appearance.
   a reindex prunes rows whose file the scan did not find and logs each prune.
 - Renaming: a save that changes the `# Title` moves the file to the title's slug,
   keeps the id, and the reply names the file that now holds the text.
+- Watching: an edit made by another program is picked up by the worker's own
+  timer without a command; a pass reports only the notes whose text changed, and
+  names none when a file was only renamed; a file added outside the app is
+  indexed with its frontmatter tags; a file deleted outside the app leaves the
+  list; a quiet vault publishes nothing; a vault that is not there does not empty
+  the index.
 - Crash safety: kill the process during a write loop, reopen, `integrity_check`
   is `ok`.
 
@@ -91,7 +97,9 @@ assert!(rt.state.tasks[0].done);
   the vault is refused. A recovery file is written as a valid note with its id.
   A new note is a real `.md` before its row exists; deleting the open note moves
   the file to the trash and a reindex agrees; renaming the title moves the file
-  and keeps the id and the frontmatter.
+  and keeps the id and the frontmatter. A file edited, added or deleted by
+  another program reaches the open editor and the list while the app runs, with
+  no command from the test: the worker's timer is what notices.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.

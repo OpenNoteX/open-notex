@@ -9,15 +9,22 @@ gates from M0, not post-launch cleanup.
 | --- | --- | --- |
 | Cold start → first frame, 10k notes | ≤ 400 ms | 600 ms |
 | Commit (event → draw) p95 | ≤ 8 ms | 16 ms |
-| Idle CPU | 0 frames, 0 wakeups | any sustained wake |
+| Idle CPU | 0 frames, no render wakeups | any drawn frame while nothing changed |
 | Settled footprint, idle | ≤ 100 MB | 150 MB |
 | Footprint, 50k notes, Today open | ≤ 200 MB | 300 MB |
 | `SaveNote` p95 | ≤ 5 ms | 20 ms |
 | `--reindex`, 10k notes | ≤ 3 s | 10 s |
+| Watcher pass, 10k notes (no note read) | ≤ 100 ms | 250 ms |
 | DB size, 10k notes | ≤ 25 MB | warn only |
 
 Reference point: Rune's own settings window settles at ~70 MB footprint and
 ~0.85% CPU idle, drawing nothing while still. We aim for the same class.
+
+"0 frames" is about the render loop: `poll` returns `false`, so Rune draws
+nothing. The store's worker does wake every two seconds while a vault is open, to
+look for edits made outside the app; that is a metadata walk on a background
+thread, it publishes nothing when the vault has not moved, and it never asks for a
+frame. Its cost is the "watcher pass" row.
 
 ## Measured
 
@@ -52,11 +59,18 @@ M1a store, release build, same machine, 10k-note fixture from `xtask seed`:
 | FTS query, 50 hits | 3.3–5.1 ms | — |
 | DB size, 10k notes | 11.4 MiB | ≤ 25 MB |
 | Vault scan (10k files, cache warm) | 0.24 s | — |
+| Watcher quiet pass, 10k notes | 36 ms median, 36 ms p95 | ≤ 100 ms target, 250 ms gate |
 
 The reindex figures include the prune added with delete: a scan of `note_index`
 plus a set of the paths found (10k rows, ~5 ms), so a note deleted outside the
 app leaves the list at the next launch. The 3 s target is still missed by the
 vault scan and the per-note write; the 10 s gate holds.
+
+The watcher pass is one `read_dir` walk plus a `stat` per file: it reads no
+note, which is what keeps it at 36 ms for 10k notes. The worker runs one every
+two seconds while a vault is open, so it costs ~2% of that thread and a save
+waits at most one pass behind it — well inside the 700 ms autosave idle window.
+A vault that has not moved is not opened at all.
 
 `notes()` is the whole index, decoded into `NoteRow`s: ~5 ms and a few MB at
 10k, inside the 8 MB read model budget but not bounded by it. It has to become a
@@ -118,7 +132,8 @@ nothing to the database.
 7. Prepared-statement cache and covering indexes for the four hot queries.
 8. `PRAGMA optimize` on shutdown, `ANALYZE` after migrations.
 9. `on_ready` defers indexing, backups and the watcher until after the first
-   frame.
+   frame. The watcher is a metadata comparison, so a quiet vault costs a walk
+   and no reads.
 10. `.cache()` for static chrome; it bypasses the cache only while something
     inside actually animates.
 11. Skeletons instead of infinite spinners: a loop is a permanent wakeup.

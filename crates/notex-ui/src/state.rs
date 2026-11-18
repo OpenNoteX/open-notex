@@ -417,6 +417,27 @@ impl State {
         self.release_requested = Some(version.into());
     }
 
+    /// The open note's file changed on disk, and the draft holds nothing that
+    /// is not saved: read the note again so the editor shows what is there now.
+    ///
+    /// A dirty draft is left exactly as it is — its next save reports the
+    /// conflict and the person chooses — and so is one that already explains a
+    /// conflict, or the explanation would vanish under the banner.
+    pub fn refresh_from_disk(&mut self, notes: &[String]) -> bool {
+        let Some(draft) = &self.draft else {
+            return false;
+        };
+        if !notes.iter().any(|id| id == &draft.id) {
+            return false;
+        }
+        if draft.is_dirty() || draft.conflict.is_some() || draft.error.is_some() {
+            return false;
+        }
+        let id = draft.id.clone();
+        self.open_now(&id);
+        true
+    }
+
     /// Drop everything queued behind a save. Called when the window closes: the
     /// note being left stays open, and nothing fires after the screen is gone.
     pub fn cancel_pending(&mut self) {

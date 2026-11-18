@@ -154,7 +154,19 @@ pub fn reindex_vault(
     let mut batch = Batch::new(conn, now, device_id)?;
     let mut keep = std::collections::HashSet::with_capacity(paths.len());
     for path in paths {
-        let note = crate::vault::read_note(&path)?;
+        // The scan and the read are two passes over the tree, so a file can be
+        // gone by the time it is opened: another window, `git checkout`, an
+        // editor that saves by rename. A file that is not there is not a note;
+        // `prune` drops its row.
+        let note = match crate::vault::read_note(&path) {
+            Ok(note) => note,
+            Err(crate::vault::VaultError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         batch.upsert(&note.file, &note.body)?;
         keep.insert(note.file.path);
     }
@@ -162,6 +174,107 @@ pub fn reindex_vault(
     // is the truth, and a row it did not find is not a note any more.
     batch.prune(&keep)?;
     batch.commit()
+}
+
+/// What one look at the vault found, for the watcher that catches edits made
+/// outside the app.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Sync {
+    /// Something on disk no longer matches the index: a file added, edited,
+    /// renamed or deleted.
+    pub changed: bool,
+    /// The notes whose text changed, sorted. A pure rename has none — the row
+    /// moved, the note did not — so an open editor has nothing to re-read.
+    pub notes: Vec<String>,
+}
+
+/// Bring the index up to date with the vault, reading nothing when the vault has
+/// not moved.
+///
+/// This is what the worker runs on a timer. It costs one `read_dir` walk and a
+/// `stat` per file, so a quiet vault costs nothing and a 10k-note vault costs a
+/// few milliseconds; only a vault that actually differs is opened and indexed.
+pub fn sync_vault(
+    conn: &mut Connection,
+    root: &std::path::Path,
+    now: i64,
+    device_id: &str,
+) -> Result<Sync, StoreError> {
+    // A vault that is not there is not a vault every note was deleted from. An
+    // unmounted drive, a renamed folder: keep the index and try again later.
+    if !root.is_dir() {
+        return Ok(Sync::default());
+    }
+    if vault_matches(conn, root)? {
+        return Ok(Sync::default());
+    }
+
+    let before = hashes(conn)?;
+    reindex_vault(conn, root, now, device_id)?;
+    let after = hashes(conn)?;
+    let mut notes: Vec<String> = after
+        .iter()
+        .filter(|(id, hash)| before.get(*id) != Some(*hash))
+        .map(|(id, _)| id.clone())
+        .collect();
+    notes.sort();
+    Ok(Sync {
+        changed: true,
+        notes,
+    })
+}
+
+/// Does the vault still hold exactly the files the index describes? Metadata
+/// only: no note is read, which is the whole point.
+fn vault_matches(conn: &Connection, root: &std::path::Path) -> Result<bool, StoreError> {
+    let paths = crate::vault::scan_paths(root)?;
+    let mut statement = conn.prepare("SELECT path, mtime_ns, size FROM note_index")?;
+    let indexed = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+
+    if indexed.len() != paths.len() {
+        return Ok(false);
+    }
+    for path in paths {
+        let key = path.to_string_lossy();
+        let Some((mtime_ns, size)) = indexed.get(key.as_ref()) else {
+            return Ok(false);
+        };
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            // Vanished between the walk and the `stat`: a change, not an error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.len() as i64 != *size || mtime_of(&metadata) != *mtime_ns {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn hashes(conn: &Connection) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+    let mut statement = conn.prepare("SELECT id, hash FROM note_index")?;
+    Ok(statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?)
+}
+
+/// Nanoseconds since the epoch, the same number `vault::read_note` stores, so
+/// the comparison is against the value the index actually holds.
+fn mtime_of(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 fn upsert_in(
