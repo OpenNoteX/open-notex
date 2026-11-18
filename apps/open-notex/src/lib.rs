@@ -356,6 +356,25 @@ fn keep_draft_in(dir: &Path, id: &str, body: &str) -> std::io::Result<PathBuf> {
 }
 
 /// The database lives with the app's other data, never in the vault (rule 8).
+/// The version line: `openNoteX 0.1.0 (abc1234)`. The revision is stamped by the
+/// release workflow; a local build says `dev`, so a bug report says which binary
+/// it came from.
+pub fn version_line() -> String {
+    format!(
+        "{} {} ({})",
+        notex_ui::TITLE,
+        env!("CARGO_PKG_VERSION"),
+        option_env!("NOTEX_REVISION").unwrap_or("dev")
+    )
+}
+
+/// `--version` is ours: Rune owns the rest of the command line, so the answer
+/// has to happen before it starts. `--scene`, `--snap` and `--tree` are
+/// untouched and still reach Rune.
+pub fn wants_version(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--version" || arg == "-V")
+}
+
 pub fn db_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -406,6 +425,24 @@ mod tests {
         assert!(kept.ends_with("# Kept\n\nmine\n"), "{kept}");
         let (_, body) = notex_store::vault::parse_note_source(&kept).unwrap();
         assert_eq!(body, "# Kept\n\nmine\n", "the body survives verbatim");
+    }
+
+    #[test]
+    fn the_version_line_names_the_app_the_version_and_the_build() {
+        let line = version_line();
+        assert!(line.starts_with("openNoteX 0.0.1 ("), "{line}");
+        assert!(line.ends_with(')'), "{line}");
+    }
+
+    #[test]
+    fn only_version_flags_are_answered_before_rune_sees_the_line() {
+        let args = |line: &[&str]| line.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert!(wants_version(&args(&["--version"])));
+        assert!(wants_version(&args(&["-V"])));
+        assert!(wants_version(&args(&["--vault", "/tmp/v", "--version"])));
+        assert!(!wants_version(&args(&["--snap", "out.png"])));
+        assert!(!wants_version(&args(&["--scene", "notes-list"])));
+        assert!(!wants_version(&args(&[])));
     }
 
     #[test]

@@ -177,6 +177,24 @@ One timer at a time, armed with Rune's `tx.wake_after`. See
 [`SCHEDULING.md`](SCHEDULING.md). Deadlines are on Rune's clock, which is virtual
 in headless runs, so reminder tests need no sleeping.
 
+## Packaging
+
+`cargo xtask bundle` is the only thing that turns a build into a `.app`, and it
+uses the tools a Mac already has: `codesign` (ad-hoc until there is a Developer
+ID), `hdiutil` for the disk image, `ditto` for the zip, `shasum` for the
+checksums. The bundle id and the version in `Info.plist` come from
+`xtask/src/bundle.rs` and the workspace version, so a release cannot disagree
+with the crate it was built from, and `--version` answers before Rune starts so
+a downloaded build says which commit it is.
+
+The app is Apple Silicon only: the bundler reads the binary's Mach-O header and
+refuses anything else with the command that fixes it, instead of shipping a
+`.dmg` that dies on launch. Updates ship as a zip rather than a disk image,
+because a running bundle can be replaced by an unpacked zip and a mounted image
+cannot. `bundle --check` is the only proof that matters: it launches the app
+from inside the bundle, with a `HOME` of its own, and waits for Rune's ready
+receipt to name `com.opennote.opennotex`.
+
 ## No server
 
 The process opens no listening socket, starts no child process and makes no

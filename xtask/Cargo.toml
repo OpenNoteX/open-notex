@@ -12,6 +12,8 @@ description = "Developer tasks: seed a vault, benchmark the store, run snapshots
 notex-core.workspace = true
 notex-store.workspace = true
 chrono.workspace = true
+# `bundle --check` runs the packaged app with a home of its own.
+tempfile.workspace = true
 
 [lints]
 workspace = true

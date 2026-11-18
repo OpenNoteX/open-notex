@@ -7,10 +7,17 @@
 //! and arrive through `rune::extra_args`.
 
 use notex_ui::{MIN_SIZE, SCENES, SIZE, State, TITLE, on_key, view};
-use open_notex::{flush, poll, setup};
+use open_notex::{flush, poll, setup, version_line, wants_version};
 use rune::{App, AppSpec, Chrome};
 
 fn main() {
+    // `--version` never opens a window: it answers and returns, so a release can
+    // be identified without a GPU, a vault or a database.
+    if wants_version(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        println!("{}", version_line());
+        return;
+    }
+
     // Full-size content with the traffic lights over the sidebar's title bar row,
     // and drag regions so the content under them stays clickable.
     let chrome = Chrome {
