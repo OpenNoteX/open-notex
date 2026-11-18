@@ -9,10 +9,13 @@ description = "openNoteX: notes, tasks, habits and reminders in one local-first 
 publish = false
 
 [dependencies]
+notex-core.workspace = true
 notex-store.workspace = true
 notex-ui.workspace = true
 rune.workspace = true
 rune-kit.workspace = true
+# GitHub's answer is JSON; the parser is already in the workspace's lockfile.
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

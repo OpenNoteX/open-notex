@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use notex_ui::{Load, NoteBody, NoteRow, Route, State, view};
+use notex_ui::{Action, Load, NoteBody, NoteRow, Route, State, Update, view};
 use rune::runtime::ElementInfo;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -20,6 +20,14 @@ fn runtime(state: State) -> Runtime<State> {
 
 fn vault_state() -> State {
     State::with_vault(VAULT)
+}
+
+/// A page fades in over a few frames, and a control that is still fading is not
+/// hit-testable. A person cannot click that fast; a test has to wait.
+fn settle(rt: &mut Runtime<State>) {
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
 }
 
 fn click(rt: &mut Runtime<State>, key: &str) {
@@ -129,6 +137,88 @@ fn settings_shows_the_vault_and_the_version() {
         "the vault path is shown: {texts:?}"
     );
     assert!(texts.iter().any(|t| t == "0.0.1"), "the version is shown");
+}
+
+#[test]
+fn settings_offers_the_update_check_and_asks_only_when_pressed() {
+    let mut rt = runtime(vault_state());
+    click(&mut rt, "nav-settings");
+
+    // Nothing is asked on launch: the app is local-first, and a check is a
+    // request to GitHub.
+    assert_eq!(label_of(&rt, "update-status"), "Not checked");
+    assert!(
+        rt.find("update-banner").is_none(),
+        "no banner before a check"
+    );
+
+    settle(&mut rt);
+    click(&mut rt, "update-check");
+    assert_eq!(rt.state.update, Update::Checking);
+    assert_eq!(label_of(&rt, "update-status"), "Checking…");
+    assert_eq!(rt.state.take_action(), Some(Action::CheckForUpdates));
+    assert_eq!(
+        rt.state.take_action(),
+        None,
+        "pressing again while a check runs is not a second request"
+    );
+}
+
+#[test]
+fn a_newer_release_is_a_banner_with_the_page_it_lives_on() {
+    let mut state = vault_state();
+    state.route = Route::Settings;
+    state.update_available("0.1.0");
+    let mut rt = runtime(state);
+    settle(&mut rt);
+
+    assert!(rt.find("update-banner").is_some(), "the banner renders");
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(
+        texts.iter().any(|t| t == "openNoteX 0.1.0 is available"),
+        "{texts:?}"
+    );
+
+    click(&mut rt, "update-view");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::ShowRelease("0.1.0".to_owned()))
+    );
+}
+
+#[test]
+fn a_check_that_failed_is_a_sentence_and_never_a_banner() {
+    let mut state = vault_state();
+    state.route = Route::Settings;
+    state.update_failed("GitHub did not answer: curl: (6) Could not resolve host");
+    let rt = runtime(state);
+
+    assert!(rt.find("update-banner").is_none(), "a failure is not news");
+    assert!(
+        label_of(&rt, "update-status").starts_with("GitHub did not answer"),
+        "the reason is the row's text"
+    );
+}
+
+#[test]
+fn every_answer_from_the_check_reads_as_a_sentence() {
+    let mut state = vault_state();
+    let summary = |state: &State| state.update.summary();
+
+    assert_eq!(summary(&state), "Not checked");
+
+    state.request_update_check();
+    assert_eq!(summary(&state), "Checking…");
+
+    state.update_current();
+    assert_eq!(summary(&state), "Up to date");
+
+    state.update_ahead();
+    assert_eq!(summary(&state), "Ahead of the latest release");
+
+    state.update_available("0.1.0");
+    assert_eq!(summary(&state), "0.1.0 is available");
+    assert_eq!(state.update.offered(), Some("0.1.0"));
 }
 
 #[test]

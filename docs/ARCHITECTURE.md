@@ -197,7 +197,13 @@ receipt to name `com.opennote.opennotex`.
 
 ## No server
 
-The process opens no listening socket, starts no child process and makes no
-network call. Communication is in-process channels plus optional OS handoffs:
-`rune::single_instance` (named pipe), the `opennotex://` URL scheme, and the
-notification callback. `lsof` on a running build must show no listeners.
+The process opens no listening socket and serves nothing. Communication is
+in-process channels plus optional OS handoffs: `rune::single_instance` (named
+pipe), the `opennotex://` URL scheme, and the notification callback. `lsof` on a
+running build must show no listeners.
+
+It also calls out to nothing on its own. The only network request and the only
+child processes happen when a person asks for them: **Check now** in Settings
+runs `curl` for the latest release tag, and the banner's button runs `open` for
+the release page. Both are described in decision 0014, and both fail quietly into
+a sentence rather than blocking a frame.

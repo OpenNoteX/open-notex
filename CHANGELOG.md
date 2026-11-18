@@ -8,6 +8,12 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- Settings → Updates: **Check now** asks GitHub for the latest release and says
+  whether a newer one exists; a newer one becomes a banner naming the version,
+  with a button that opens its release page. Nothing is asked on launch — the
+  check is a `curl` started when pressed — and a failed check is a sentence in
+  the row, not an error state. Comparison is numeric, so `0.10.0` is newer than
+  `0.9.0`.
 - Creating: `⌘N` and a plus in the note list write a real Markdown file with a
   fresh id and `# Untitled`, then open it. A title already in use gets `-2`.
 - Deleting: `⌘⌫` and the trash button in the detail pane, confirmed in a dialog.

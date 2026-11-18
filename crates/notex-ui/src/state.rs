@@ -158,6 +158,55 @@ pub enum Action {
     Create,
     /// Move a note's file to the trash and drop it from the list.
     Delete(String),
+    /// Ask GitHub for the latest release. Starts a process, so it is an action
+    /// rather than something the view does.
+    CheckForUpdates,
+    /// Open a release page in the browser, by version.
+    ShowRelease(String),
+}
+
+/// Where the update check stands. Settings shows it, and only a release newer
+/// than this build gets a banner: a check that failed is a line of text, not an
+/// alarm, because the app works exactly the same without one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Update {
+    /// Nothing has been asked yet. The default, because this app calls out to
+    /// nothing unless a person asks it to.
+    #[default]
+    Unchecked,
+    Checking,
+    /// A release newer than this build, as `0.1.0`.
+    Available(String),
+    /// This build is the latest release.
+    Current,
+    /// The latest release is older than this build: a development build, or a
+    /// release that was withdrawn. Nothing to offer, and saying "up to date"
+    /// would be the wrong sentence.
+    Ahead,
+    /// Why the check could not answer, in a sentence.
+    Failed(String),
+}
+
+impl Update {
+    /// The line under "Updates" in Settings.
+    pub fn summary(&self) -> String {
+        match self {
+            Update::Unchecked => "Not checked".to_owned(),
+            Update::Checking => "Checking…".to_owned(),
+            Update::Available(version) => format!("{version} is available"),
+            Update::Current => "Up to date".to_owned(),
+            Update::Ahead => "Ahead of the latest release".to_owned(),
+            Update::Failed(message) => message.clone(),
+        }
+    }
+
+    /// The version a banner should offer, when there is one.
+    pub fn offered(&self) -> Option<&str> {
+        match self {
+            Update::Available(version) => Some(version),
+            _ => None,
+        }
+    }
 }
 
 pub struct State {
@@ -187,6 +236,12 @@ pub struct State {
     pub confirm_delete: Option<String>,
     /// The last create or delete that a worker refused, for the list pane.
     pub action_error: Option<String>,
+    /// Where the update check stands. `Unchecked` until someone asks.
+    pub update: Update,
+    /// A check was asked for and has not been sent yet.
+    update_requested: bool,
+    /// A release page was asked for, by version.
+    release_requested: Option<String>,
     /// `⌘S` or the Save button asked for a save now.
     save_requested: bool,
     /// The last `poll` clock, for `tick`. Seconds since the app started.
@@ -217,6 +272,9 @@ impl State {
             pending_delete: None,
             confirm_delete: None,
             action_error: None,
+            update: Update::Unchecked,
+            update_requested: false,
+            release_requested: None,
             save_requested: false,
             clock: 0.0,
             vault: vault.into(),
@@ -321,6 +379,42 @@ impl State {
             let id = draft.id.clone();
             self.open_now(&id);
         }
+    }
+
+    /// The "Check now" button. Asking twice while a check is running is not a
+    /// second request: the answer is already on its way.
+    pub fn request_update_check(&mut self) {
+        if matches!(self.update, Update::Checking) {
+            return;
+        }
+        self.update = Update::Checking;
+        self.update_requested = true;
+    }
+
+    /// The check answered with a release newer than this build. The version is
+    /// stored as text, because that is what a banner shows and a link needs.
+    pub fn update_available(&mut self, version: impl Into<String>) {
+        self.update = Update::Available(version.into());
+    }
+
+    /// The check answered that this build is the latest release.
+    pub fn update_current(&mut self) {
+        self.update = Update::Current;
+    }
+
+    /// The check answered with a release older than this build.
+    pub fn update_ahead(&mut self) {
+        self.update = Update::Ahead;
+    }
+
+    /// The check could not answer. A sentence, not a code: it is shown as is.
+    pub fn update_failed(&mut self, message: impl Into<String>) {
+        self.update = Update::Failed(message.into());
+    }
+
+    /// The banner's "View release" button.
+    pub fn request_release(&mut self, version: impl Into<String>) {
+        self.release_requested = Some(version.into());
     }
 
     /// Drop everything queued behind a save. Called when the window closes: the
@@ -484,6 +578,15 @@ impl State {
 
     /// The next command the app should send. Called from `poll` after `tick`.
     pub fn take_action(&mut self) -> Option<Action> {
+        // The update requests come before the editor: they are one-shot, and a
+        // check must not wait behind a draft that is waiting out its idle delay.
+        if let Some(version) = std::mem::take(&mut self.release_requested) {
+            return Some(Action::ShowRelease(version));
+        }
+        if std::mem::take(&mut self.update_requested) {
+            return Some(Action::CheckForUpdates);
+        }
+
         if let Some(draft) = &mut self.draft
             && draft.conflict.is_none()
             && draft.error.is_none()

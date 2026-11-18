@@ -9,6 +9,9 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod update;
+
+use notex_core::Availability;
 use notex_store::worker::{self, Cmd, Evt, Notify, StoreHandle, Worker};
 use notex_store::{StoreError, db};
 use notex_ui::{Action, Load, NoteRow, State};
@@ -123,6 +126,10 @@ pub fn setup(state: &mut State, waker: Waker) {
         return;
     }
 
+    // Kept for the update check: it answers on its own thread and has to ask for
+    // a frame, or the settings row would wait for the next keypress.
+    WAKER.with(|slot| *slot.borrow_mut() = Some(waker.clone()));
+
     let vault = PathBuf::from(&state.vault);
     if let Ok(session) = start(state, &vault, &db_path(), Wake(waker)) {
         SESSION.with(|slot| *slot.borrow_mut() = Some(session));
@@ -144,7 +151,32 @@ pub fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
             changed |= pump(state, session.handle());
         }
     });
+    UPDATER.with(|slot| {
+        if let Some(updater) = slot.borrow().as_ref() {
+            while let Some(checked) = updater.poll() {
+                changed |= apply_check(state, checked);
+            }
+        }
+    });
     changed
+}
+
+/// Turn one answer into the Settings row. Split out from [`poll`] so the mapping
+/// is tested without a thread, a process or a network.
+fn apply_check(state: &mut State, checked: update::Checked) -> bool {
+    match checked {
+        update::Checked::Compared(availability) => match availability {
+            Availability::Newer(version) => state.update_available(version.to_string()),
+            Availability::UpToDate => state.update_current(),
+            // A development build is newer than the release. Saying "up to date"
+            // would be the wrong sentence.
+            Availability::Older(_) => state.update_ahead(),
+            // A tag this cannot read is a tag it must not offer.
+            Availability::Unknown => state.update_failed("GitHub's release tag is not a version."),
+        },
+        update::Checked::Failed(message) => state.update_failed(message),
+    }
+    true
 }
 
 /// Send the commands the editor and the list asked for, then apply every event
@@ -174,6 +206,24 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
                 if handle.send(Cmd::DeleteNote { id: id.clone() }).is_err() {
                     state.delete_failed(&id, "The store is no longer running.");
                 }
+            }
+            Action::CheckForUpdates => {
+                let wake = WAKER.with(|slot| slot.borrow().clone());
+                let Some(wake) = wake else {
+                    // No window means no frame to draw the answer in.
+                    state.update_failed("The update check needs a window.");
+                    changed = true;
+                    continue;
+                };
+                UPDATER.with(|slot| {
+                    *slot.borrow_mut() = Some(update::Updater::start(
+                        env!("CARGO_PKG_VERSION"),
+                        move || wake(),
+                    ));
+                });
+            }
+            Action::ShowRelease(version) => {
+                update::open_page(&update::release_page(&version));
             }
             Action::Save(request) => {
                 let id = request.id.clone();
@@ -408,11 +458,62 @@ thread_local! {
     /// The one session for this window. Setup runs on the UI thread, poll reads
     /// it there, and it drops (joining the worker) when that thread ends.
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+    /// The waker the update check uses to ask for a frame once it has an answer.
+    static WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
+    /// The check in flight, if someone asked for one.
+    static UPDATER: RefCell<Option<update::Updater>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version(text: &str) -> notex_core::Version {
+        notex_core::Version::parse(text).unwrap()
+    }
+
+    #[test]
+    fn each_answer_from_the_check_reads_as_the_right_row() {
+        let mut state = State::with_vault("/tmp/v");
+
+        apply_check(
+            &mut state,
+            update::Checked::Compared(Availability::Newer(version("0.1.0"))),
+        );
+        assert_eq!(
+            state.update,
+            notex_ui::Update::Available("0.1.0".to_owned())
+        );
+        assert_eq!(state.update.offered(), Some("0.1.0"));
+
+        apply_check(
+            &mut state,
+            update::Checked::Compared(Availability::UpToDate),
+        );
+        assert_eq!(state.update, notex_ui::Update::Current);
+
+        // A development build is newer than the last release, and it is not
+        // "up to date": there is nothing to install and nothing to hide.
+        apply_check(
+            &mut state,
+            update::Checked::Compared(Availability::Older(version("0.9.0"))),
+        );
+        assert_eq!(state.update, notex_ui::Update::Ahead);
+
+        // A tag that is not a version is not offered.
+        apply_check(&mut state, update::Checked::Compared(Availability::Unknown));
+        assert!(matches!(state.update, notex_ui::Update::Failed(_)));
+        assert_eq!(state.update.offered(), None);
+
+        apply_check(
+            &mut state,
+            update::Checked::Failed("GitHub did not answer.".to_owned()),
+        );
+        assert_eq!(
+            state.update,
+            notex_ui::Update::Failed("GitHub did not answer.".to_owned())
+        );
+    }
 
     #[test]
     fn an_unwritable_draft_is_kept_as_a_valid_note() {
