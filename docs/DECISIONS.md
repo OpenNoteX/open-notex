@@ -94,3 +94,20 @@ move happens before the index write, so a crash between them costs a reindex
 (the row is pruned), never the body; a file already gone from the disk is
 treated as deleted. *Reopen if:* we ship an in-app trash with restore, which
 would need the index to keep the row and the reason.
+
+## 0013 — A download is ad-hoc signed, and the installer is the supported path
+
+Notarization needs a Developer ID certificate, which needs a paid Apple
+Developer account we do not have yet. Apple Silicon refuses an unsigned binary
+outright, so every release is at least ad-hoc signed (`codesign -s -`); the
+alternative — shipping nothing installable until the account exists — costs
+more than it buys. Ad-hoc has two consequences, both handled rather than
+hidden: macOS refuses an app that arrived with `com.apple.quarantine`, and each
+build has a different ad-hoc identity, so anything bound to code signing starts
+over on an update. `scripts/install.sh` verifies the checksum and clears the
+quarantine flag, which is why it, not the `.dmg`, is what `RELEASING.md` tells
+people to run; nothing today depends on a stable signing identity.
+`cargo xtask bundle --sign` already produces a hardened, timestamped Developer
+ID build, so M6b is a secrets change plus notarization, not a rewrite. *Reopen
+when* the account exists, which is also the condition for M6c (in-place update
+keeps permission grants only if the identity is stable).

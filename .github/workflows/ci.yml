@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -45,7 +45,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: core-artifacts-${{ matrix.os }}
           path: artifacts/
@@ -58,7 +58,7 @@ jobs:
     name: app (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -81,7 +81,7 @@ jobs:
 
       - name: Upload snapshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: snapshots-macOS
           path: artifacts/snaps/
