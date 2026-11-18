@@ -45,13 +45,18 @@ M1a store, release build, same machine, 10k-note fixture from `xtask seed`:
 
 | Metric | Measured | Budget |
 | --- | --- | --- |
-| `--reindex`, 10k notes, empty database | 4.2 s | ≤ 3 s target, 10 s gate |
-| `--reindex`, 10k notes, unchanged vault | 0.21–0.24 s | — |
+| `--reindex`, 10k notes, empty database | 3.3 s | ≤ 3 s target, 10 s gate |
+| `--reindex`, 10k notes, unchanged vault | 0.19 s | — |
 | `notes()` list for 10k notes | 4.9–5.2 ms | — |
 | `COUNT(*)` for 10k notes | 0.3–0.5 ms | — |
 | FTS query, 50 hits | 3.3–5.1 ms | — |
 | DB size, 10k notes | 11.4 MiB | ≤ 25 MB |
 | Vault scan (10k files, cache warm) | 0.24 s | — |
+
+The reindex figures include the prune added with delete: a scan of `note_index`
+plus a set of the paths found (10k rows, ~5 ms), so a note deleted outside the
+app leaves the list at the next launch. The 3 s target is still missed by the
+vault scan and the per-note write; the 10 s gate holds.
 
 `notes()` is the whole index, decoded into `NoteRow`s: ~5 ms and a few MB at
 10k, inside the 8 MB read model budget but not bounded by it. It has to become a

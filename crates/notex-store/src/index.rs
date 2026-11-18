@@ -85,11 +85,83 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
+    /// Drop rows whose file the scan did not find, which is how a note deleted
+    /// or renamed outside the app leaves the list. Each removal writes its oplog
+    /// row, like any other delete.
+    pub fn prune(
+        &mut self,
+        keep: &std::collections::HashSet<std::path::PathBuf>,
+    ) -> Result<u64, StoreError> {
+        let rows: Vec<(String, String, Option<i64>, i64)> = self
+            .tx
+            .prepare("SELECT id, path, fts_rowid, rev FROM note_index")?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut pruned = 0;
+        for (id, path, fts_rowid, rev) in rows {
+            if keep.contains(std::path::Path::new(&path)) {
+                continue;
+            }
+            if let Some(rowid) = fts_rowid {
+                self.tx
+                    .prepare_cached("DELETE FROM notes_fts WHERE rowid = ?1")?
+                    .execute(params![rowid])?;
+            }
+            self.tx
+                .prepare_cached("DELETE FROM note_index WHERE id = ?1")?
+                .execute(params![id])?;
+            self.tx
+                .prepare_cached("DELETE FROM item_tags WHERE item_type = 'note' AND item_id = ?1")?
+                .execute(params![id])?;
+            oplog::append(
+                &self.tx,
+                oplog::Entry {
+                    entity: "note",
+                    entity_id: &id,
+                    op: "delete",
+                    payload: "{}",
+                    at: self.now,
+                    device_id: self.device_id,
+                    rev: rev + 1,
+                },
+            )?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
+
     /// Commit the batch and report how many notes it wrote.
     pub fn commit(self) -> Result<u64, StoreError> {
         self.tx.commit()?;
         Ok(self.count)
     }
+}
+
+/// Rebuild the index from the vault: one transaction, one oplog row per changed
+/// note, and rows whose file the scan did not find pruned. This is the whole
+/// `--reindex` path, shared by the worker and `xtask bench`, so a budget
+/// measures the code that ships.
+pub fn reindex_vault(
+    conn: &mut Connection,
+    root: &std::path::Path,
+    now: i64,
+    device_id: &str,
+) -> Result<u64, StoreError> {
+    let paths = crate::vault::scan_paths(root)?;
+    let mut batch = Batch::new(conn, now, device_id)?;
+    let mut keep = std::collections::HashSet::with_capacity(paths.len());
+    for path in paths {
+        let note = crate::vault::read_note(&path)?;
+        batch.upsert(&note.file, &note.body)?;
+        keep.insert(note.file.path);
+    }
+    // A file deleted or renamed outside the app leaves the list here: the scan
+    // is the truth, and a row it did not find is not a note any more.
+    batch.prune(&keep)?;
+    batch.commit()
 }
 
 fn upsert_in(
@@ -312,6 +384,18 @@ pub fn notes(conn: &Connection) -> Result<Vec<NoteSummary>, StoreError> {
     Ok(notes)
 }
 
+/// The title the index has for a note. A save that changes it renames the file.
+pub fn note_title(conn: &Connection, id: &str) -> Result<Option<String>, StoreError> {
+    let title = conn
+        .query_row(
+            "SELECT title FROM note_index WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(title)
+}
+
 /// The file an indexed id names, or `None` when the note is gone from the index.
 pub fn note_path(conn: &Connection, id: &str) -> Result<Option<std::path::PathBuf>, StoreError> {
     let path = conn
@@ -404,6 +488,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deletes, 1);
+    }
+
+    #[test]
+    fn a_reindex_prunes_the_rows_of_files_that_are_gone() {
+        use std::collections::HashSet;
+
+        let mut conn = db::open_in_memory().unwrap();
+        let kept = note("01ARZ3NDEKTSV4RRFFQ69G5FAV", "Weekly review");
+        let gone = NoteFile {
+            path: PathBuf::from("/vault/gone.md"),
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            ..note("01ARZ3NDEKTSV4RRFFQ69G5FAW", "Gone")
+        };
+        let mut batch = Batch::new(&mut conn, 1, "dev").unwrap();
+        batch.upsert(&kept, "still here").unwrap();
+        batch.upsert(&gone, "deleted outside the app").unwrap();
+        batch.commit().unwrap();
+
+        let mut keep = HashSet::new();
+        keep.insert(kept.path.clone());
+        let mut batch = Batch::new(&mut conn, 2, "dev").unwrap();
+        assert_eq!(batch.prune(&keep).unwrap(), 1);
+        let written = batch.commit().unwrap();
+        assert_eq!(written, 0);
+
+        assert_eq!(note_count(&conn).unwrap(), 1);
+        assert_eq!(
+            note_title(&conn, &kept.id).unwrap().as_deref(),
+            Some("Weekly review")
+        );
+        assert!(note_title(&conn, &gone.id).unwrap().is_none());
+        assert_eq!(
+            search(&conn, "deleted", 10).unwrap().len(),
+            0,
+            "the pruned note leaves the search index"
+        );
+        let deletes: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM oplog WHERE op = 'delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deletes, 1, "a prune is logged like any delete");
     }
 
     #[test]

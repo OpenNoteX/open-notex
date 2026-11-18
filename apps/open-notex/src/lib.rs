@@ -160,6 +160,21 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
                     state.fail_body(&id, "The store is no longer running.".to_owned());
                 }
             }
+            Action::Create => {
+                if handle
+                    .send(Cmd::CreateNote {
+                        title: "Untitled".to_owned(),
+                    })
+                    .is_err()
+                {
+                    state.create_failed("The store is no longer running.");
+                }
+            }
+            Action::Delete(id) => {
+                if handle.send(Cmd::DeleteNote { id: id.clone() }).is_err() {
+                    state.delete_failed(&id, "The store is no longer running.");
+                }
+            }
             Action::Save(request) => {
                 let id = request.id.clone();
                 let sent = handle.send(Cmd::SaveNote {
@@ -204,6 +219,25 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
                     .collect(),
             );
             state.load = Load::Ready;
+            true
+        }
+        Evt::Created { id, body, hash } => {
+            state.created(&id, body, hash);
+            // The row comes from the index, like every other row.
+            let _ = handle.send(Cmd::ListNotes);
+            true
+        }
+        Evt::Deleted { id } => {
+            state.deleted(&id);
+            let _ = handle.send(Cmd::ListNotes);
+            true
+        }
+        Evt::CreateFailed { err } => {
+            state.create_failed(err);
+            true
+        }
+        Evt::DeleteFailed { id, err } => {
+            state.delete_failed(&id, err);
             true
         }
         Evt::Opened { id, body, hash } => {
@@ -264,8 +298,8 @@ pub fn flush(state: &mut State, _tx: &mut Tx) {
 /// there was none). Bounded, so a dead worker cannot hang the close, and split
 /// out from [`flush`] so a test can drive a session it owns.
 pub fn flush_with(state: &mut State, handle: &StoreHandle) -> bool {
-    // A switch queued behind the save must not run on the way out.
-    state.pending_open = None;
+    // Anything queued behind the save must not run on the way out.
+    state.cancel_pending();
     state.request_save();
     let started = std::time::Instant::now();
     loop {

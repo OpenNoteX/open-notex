@@ -16,7 +16,7 @@ Rune renders. No network in v1.
 | M0.5 ✅ | Rune shell: window, three panes, theme, headless snapshot harness | `cargo run` opens a window; snapshot PNG + tree JSON asserted |
 | M1a ✅ | Store in the app: DB worker wired to the UI, real notes list, note bodies read from Markdown, reindex on launch | Open the app on a vault and read a note; delete the DB, relaunch, the list comes back |
 | M1b ✅ | Editing: the selected note is its Markdown file, edited in place; autosave after idle, `⌘S`, a hash conflict guard with Reload/Overwrite, frontmatter preserved | Type, wait, see the file change; edit the file in another editor and the save refuses rather than clobbering |
-| M1 | Notes as files: create/rename/delete, watcher, tags, FTS search, Obsidian import, ⌘K | Edit a note in another editor and see it reflected; delete the DB, `--reindex`, search is identical |
+| M1 | Notes as files: create/rename/delete ✅, watcher, tags, FTS search, Obsidian import, ⌘K | Edit a note in another editor and see it reflected; delete the DB, `--reindex`, search is identical |
 | M2 | Projects, tasks, Today, due dates, recurring tasks, reorder | Today matches reality after restart; recurrence correct across DST |
 | M3 | Habits, streak engine, heatmap, freezes, at-risk states | Property tests across four timezones; hand-checked streak cases |
 | M4 | Reminders, scheduler, notifications, tray, single instance, quick capture, snooze, click-through | Reminder fires with the window hidden; click focuses the item; missed-while-away digest |

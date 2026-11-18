@@ -3,11 +3,13 @@
 //! Nothing here reads the clock, the database or the filesystem. Handlers only
 //! mutate [`State`], and the next frame is the layout of that state.
 
-use rune::{Align, Cx, El, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
+use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
 use rune_kit::shell::{
     RowStatus, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Spinner,
+};
 
 use crate::routes::{FOOTER, Route, SECTIONS};
 use crate::state::{Draft, DraftStatus, Load, NoteBody, State};
@@ -29,7 +31,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         SplitView::new(page_pane(s, &k, dark))
     };
 
-    split
+    let base = split
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, &k))
         .toolbar(toolbar(s, &k))
         .titlebar_inset(cx.titlebar_inset())
@@ -45,7 +47,55 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .in_header(),
         )
         .reduced_motion(cx.is_reduced_motion())
-        .build(&k)
+        .build(&k);
+
+    let mut layer = Vec::new();
+    delete_dialog(s, &k, &mut layer);
+    rune_kit::root(base, layer)
+}
+
+/// The confirmation before a delete. Deleting a note moves its file out of the
+/// vault, so it is never one stray press away.
+fn delete_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
+    let Some(id) = &s.confirm_delete else {
+        return;
+    };
+    let title = s
+        .notes
+        .iter()
+        .find(|note| &note.id == id)
+        .map(|note| note.title.clone())
+        .unwrap_or_else(|| "this note".to_owned());
+
+    let actions = row()
+        .key("delete-actions")
+        .w_full()
+        .padding(16.0)
+        .gap(8.0)
+        .justify_end()
+        .child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut State| s.cancel_delete())
+                .build(k)
+                .key("delete-cancel"),
+        )
+        .child(
+            Button::new("Delete")
+                .variant(ButtonVariant::Danger)
+                .on_press(|s: &mut State| s.confirm_delete())
+                .build(k)
+                .key("delete-confirm"),
+        );
+
+    Dialog::new("delete-note", format!("Delete \u{201c}{title}\u{201d}?"))
+        .description("The file moves to the trash. openNoteX stops listing it.")
+        .width(400.0)
+        .fit()
+        .open(true)
+        .on_close(|s: &mut State| s.cancel_delete())
+        .child(actions)
+        .build(k, layer);
 }
 
 /// Keys the shell answers itself: the sidebar toggle, search and settings.
@@ -65,6 +115,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     }
     if ev.is_command('s') {
         s.request_save();
+        return true;
+    }
+    if ev.is_command('n') {
+        s.request_create();
+        return true;
+    }
+    if ev.mods.cmd && matches!(ev.key, Key::Backspace | Key::Delete) {
+        s.request_delete();
         return true;
     }
     false
@@ -149,21 +207,60 @@ fn list_pane(s: &State, k: &Kit) -> El {
                 .px(16.0)
                 .pt(6.0)
                 .pb(8.0)
+                .gap(8.0)
+                .center_y()
                 .child(
                     text(subtitle)
                         .key("list-subtitle")
                         .font(k.ty.text_xsmall)
                         .color(c.text_faint)
                         .truncate(),
-                ),
+                )
+                .child(el().grow(1.0))
+                .child(new_note_button(s, k)),
         )
         .child(el().key("list-divider").w_full().h(1.0).fill(c.border_weak))
+        .children(s.action_error.as_ref().map(|error| action_error(error, k)))
         .child(match &s.load {
             Load::Ready if s.route == Route::Notes && !s.notes.is_empty() => note_list(s, k),
             Load::Ready => empty_list(s, k),
             Load::Loading => loading(k),
             Load::Failed(message) => failed_message(k, message),
         })
+}
+
+/// `⌘N` and the note list's plus. A list route without notes still needs it,
+/// so it is in the header rather than over the list.
+fn new_note_button(s: &State, k: &Kit) -> El {
+    if s.route != Route::Notes {
+        return el().key("new-note-none").w(0.0).h(0.0);
+    }
+    IconButton::new(&crate::icons::PLUS)
+        .variant(IconButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .label("New note")
+        .help("New note (⌘N)")
+        .on_press(|s: &mut State| s.request_create())
+        .build(k)
+        .key("new-note")
+}
+
+/// A create or delete the worker refused, under the list header.
+fn action_error(message: &str, k: &Kit) -> El {
+    row()
+        .key("list-action-error")
+        .w_full()
+        .px(16.0)
+        .py(8.0)
+        .gap(6.0)
+        .child(icon(&crate::icons::WARNING, 12.0).color(k.c.danger.fg))
+        .child(
+            text(message)
+                .key("list-action-error-text")
+                .font(k.ty.caption())
+                .color(k.c.danger.fg)
+                .wrap(),
+        )
 }
 
 /// The notes list: one row per Markdown file, alphabetical by title.
@@ -325,11 +422,29 @@ fn note_detail(s: &State, k: &Kit) -> El {
         .pb(12.0)
         .gap(4.0)
         .child(
-            text(title)
-                .key("detail-title")
-                .font(k.ty.ui_medium)
-                .color(c.text_base)
-                .wrap(),
+            row()
+                .key("detail-title-row")
+                .w_full()
+                .gap(8.0)
+                .items_start()
+                .child(
+                    text(title)
+                        .key("detail-title")
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base)
+                        .wrap()
+                        .grow(1.0),
+                )
+                .child(
+                    IconButton::new(&crate::icons::TRASH)
+                        .variant(IconButtonVariant::GhostMuted)
+                        .control_size(ControlSize::Small)
+                        .label("Delete note")
+                        .help("Delete note (⌘⌫)")
+                        .on_press(|s: &mut State| s.request_delete())
+                        .build(k)
+                        .key("delete-note"),
+                ),
         );
     if !tags.is_empty() {
         head = head.child(

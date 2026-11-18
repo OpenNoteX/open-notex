@@ -83,3 +83,14 @@ pinned Rust.
 Rune depends on `tokio` directly (with `wasm-bindgen-futures` and `zbus` behind
 it), so it is in the binary. Our code builds no runtime: threads and channels
 remain the only concurrency, per 0005.
+
+## 0012 — A deleted note's file goes to the app's trash, not a vault folder
+
+Deleting a note moves its Markdown file to `~/Library/Application Support/
+openNoteX/trash/` (beside the database) and then drops its index row. A trash
+folder inside the vault would break the rule that every `.md` under the vault is
+a note: the next reindex would adopt the deleted files back into the list. The
+move happens before the index write, so a crash between them costs a reindex
+(the row is pruned), never the body; a file already gone from the disk is
+treated as deleted. *Reopen if:* we ship an in-app trash with restore, which
+would need the index to keep the row and the reason.

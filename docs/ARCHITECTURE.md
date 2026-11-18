@@ -48,10 +48,13 @@ The database lives in the platform data directory, never inside the vault.
 ```rust
 pub enum Cmd {
     Ping, Reindex { root }, ListNotes, OpenNote { id },
-    SaveNote { id, body, base_hash, token, force }, Shutdown,
+    SaveNote { id, body, base_hash, token, force },
+    CreateNote { title }, DeleteNote { id }, Shutdown,
 }
 pub enum Evt {
     Pong, Indexed { count }, Notes(Vec<NoteSummary>),
+    Created { id, body, hash }, Deleted { id },
+    CreateFailed { err }, DeleteFailed { id, err },
     Opened { id, body, hash }, OpenFailed { id, err },
     Saved { id, token, hash, title, tags },
     SaveConflict { id, token }, SaveFailed { id, token, err },
@@ -73,6 +76,15 @@ pub enum Evt {
   command reverts the optimistic row and raises a toast.
 - Bulk jobs (`Reindex`, import) are one command that emits `Progress` and can
   be cancelled by request id.
+- `CreateNote` writes the file (fresh id in frontmatter, `# Title` body) before
+  indexing it and replies with the file as read back. `DeleteNote` moves the
+  file to the trash beside the database, then removes the row; a file already
+  missing is still removed from the index. A reindex prunes rows whose file the
+  scan did not find, and each prune writes its oplog row, so an external delete
+  leaves the list on the next launch.
+- A save whose `# Title` line changed moves the file to that title's slug in the
+  same save, keeping its id; a file named by hand keeps its name until its title
+  changes. A slug already in use gets `-2`, never an overwrite.
 
 ## The shell
 
@@ -109,10 +121,14 @@ changed, so an idle app draws nothing.
   are never in the index: `Cmd::OpenNote` names an id, the worker looks up the
   path and reads the Markdown file. `Evt::Opened` carries the file hash the
   editor sends back on save. For writes, file first, index second still holds.
-- Handlers only mutate `State`. The editor queues `Action::Open` and
-  `Action::Save`; `poll` drains them into commands, so the view never talks to
-  the worker. A body that arrives after the selection moved is dropped, not
-  raced.
+- Handlers only mutate `State`. The editor queues `Action::Open`,
+  `Action::Save`, `Action::Create` and `Action::Delete`; `poll` drains them into
+  commands, so the view never talks to the worker. A body that arrives after the
+  selection moved is dropped, not raced.
+- New note (`⌘N`, the list's plus) and delete (`⌘⌫`, the detail pane's trash)
+  are no different: they wait behind a dirty draft's save like a row switch, and
+  a refused save drops them rather than taking the text with it. Delete asks in a
+  dialog first, because the file leaves the vault.
 - A missing vault, a failed reindex or a database inside the vault becomes
   `Load::Failed` with a dismissible message; the window still opens.
 - Headless runs (`--snap`, `--scene`, the headless tests) skip `setup` entirely,
@@ -124,6 +140,8 @@ changed, so an idle app draws nothing.
 
 The detail pane edits the Markdown file itself, frontmatter excluded, so the
 `# Title` line is the rename control and there is no second preview mode.
+Changing that line and saving renames the file to the title's slug, keeping the
+note's id; a name already in use gets a `-2`, never a clobber.
 
 - `Draft` holds the `TextEdit`, the base hash, the token and two clocks. An
   edit bumps the token; a save records the token it wrote. Dirty is
