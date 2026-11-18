@@ -94,8 +94,9 @@ jobs:
         run: |
           notes=$(scripts/release-notes.sh "$GITHUB_REF_NAME")
           if [ -z "$notes" ]; then
-            notes="No CHANGELOG section for this version: see \
-            [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)."
+            # One line: a quoted string with a continuation keeps the indent,
+            # which lands on the release page as stray spaces.
+            notes="No CHANGELOG section for this version: see [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)."
           fi
           {
             echo "$notes"

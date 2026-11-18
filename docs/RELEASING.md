@@ -54,6 +54,20 @@ gh release edit v0.1.0 --draft=false
 To withdraw one, `gh release delete v0.1.0 --cleanup-tag` (the tag goes too, so
 the next attempt is not a forced re-tag) and cut a patch release.
 
+## Re-tagging a draft
+
+A tag pushed twice is still one tag, and the workflow treats it as one release.
+If a fix lands before the draft is published, move the tag and push it again:
+
+```sh
+git tag -f v0.1.0 && git push -f origin v0.1.0
+```
+
+The run finds the existing draft, uploads the new artifacts with `--clobber` and
+rewrites the notes from `CHANGELOG.md`, so there is never a stale build sitting
+beside the new one. A **published** release is refused outright: replacing assets
+people have already downloaded is a new version, not a re-tag.
+
 ## What an install actually does
 
 `scripts/install.sh` downloads the zip, compares its SHA-256 with the release's
