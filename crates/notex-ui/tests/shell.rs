@@ -5,7 +5,9 @@
 
 use std::collections::HashSet;
 
-use notex_ui::{Action, Load, NoteBody, NoteRow, Route, State, Update, view};
+use notex_ui::{
+    Action, Load, NoteBody, NoteRow, Route, State, Update, VaultIntent, VaultStatus, view,
+};
 use rune::runtime::ElementInfo;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -678,4 +680,209 @@ fn a_conflict_banner_is_not_replaced_by_a_quiet_reload() {
     state.save_conflict("01A", "This file changed on disk since you opened it.");
     assert!(!state.refresh_from_disk(&["01A".to_owned()]));
     assert!(state.draft.as_ref().unwrap().conflict.is_some());
+}
+
+/// A first launch: no vault, the dialog up, and a status the app already
+/// answered (the real app inspects the folder; a test does not need a disk).
+fn setup_state(status: VaultStatus) -> State {
+    let mut state = State::with_vault(VAULT);
+    state.ask_for_vault(VAULT, None);
+    state.vault_checked(VAULT, status);
+    state
+}
+
+#[test]
+fn a_missing_vault_is_one_dialog_with_create_choose_and_not_now() {
+    let mut rt = runtime(setup_state(VaultStatus::Missing));
+    settle(&mut rt);
+
+    assert!(rt.find("vault-dialog").is_some(), "the dialog is up");
+    assert_eq!(label_of(&rt, "vault-path"), VAULT);
+    assert_eq!(
+        label_of(&rt, "vault-status"),
+        "This folder does not exist yet."
+    );
+    assert_eq!(label_of(&rt, "vault-primary"), "Create folder");
+    assert!(
+        rt.find("vault-choose").is_some(),
+        "the system sheet is offered"
+    );
+    assert!(rt.find("vault-not-now").is_some(), "leaving is an option");
+
+    click(&mut rt, "vault-primary");
+    assert_eq!(
+        rt.state.take_vault_intent(),
+        Some(VaultIntent::Create(VAULT.to_owned()))
+    );
+    assert!(rt.state.vault_setup.busy, "the buttons wait for the answer");
+}
+
+#[test]
+fn the_status_line_names_what_the_folder_is() {
+    for (status, line, label) in [
+        (
+            VaultStatus::Missing,
+            "This folder does not exist yet.",
+            "Create folder",
+        ),
+        (
+            VaultStatus::Empty,
+            "This folder is empty. It becomes your vault.",
+            "Use this folder",
+        ),
+        (VaultStatus::Notes(3), "3 notes here.", "Use this folder"),
+        (
+            VaultStatus::Unusable("That folder is read-only.".to_owned()),
+            "That folder is read-only.",
+            "Use this folder",
+        ),
+    ] {
+        let mut rt = runtime(setup_state(status.clone()));
+        settle(&mut rt);
+        assert_eq!(label_of(&rt, "vault-status"), line);
+        assert_eq!(label_of(&rt, "vault-primary"), label);
+
+        if !status.can_open() {
+            click(&mut rt, "vault-primary");
+            assert_eq!(
+                rt.state.take_vault_intent(),
+                None,
+                "a disabled primary button does nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn one_note_is_singular_and_an_unusable_folder_has_no_primary_action() {
+    let mut rt = runtime(setup_state(VaultStatus::Notes(1)));
+    settle(&mut rt);
+    assert_eq!(label_of(&rt, "vault-status"), "1 note here.");
+
+    let mut rt = runtime(setup_state(VaultStatus::Unusable(
+        "That is a file, not a folder.".to_owned(),
+    )));
+    settle(&mut rt);
+    assert_eq!(label_of(&rt, "vault-primary"), "Use this folder");
+    click(&mut rt, "vault-primary");
+    assert_eq!(rt.state.take_vault_intent(), None);
+}
+
+#[test]
+fn not_now_keeps_the_app_and_every_no_vault_surface_opens_the_same_dialog() {
+    let mut rt = runtime(setup_state(VaultStatus::Missing));
+    settle(&mut rt);
+
+    click(&mut rt, "vault-not-now");
+    settle(&mut rt);
+    assert!(!rt.state.vault_dialog, "the dialog closed");
+    assert!(rt.find("vault-dialog").is_none());
+    assert!(!rt.state.vault_open, "the app is still open");
+
+    // The empty list names the reason and offers the same dialog back.
+    rt.state.route = Route::Notes;
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(label_of(&rt, "list-no-vault-title"), "No vault yet");
+    click(&mut rt, "list-no-vault-choose");
+    assert!(
+        rt.state.vault_dialog && rt.find("vault-dialog").is_some(),
+        "the list asks in the same dialog"
+    );
+    click(&mut rt, "vault-not-now");
+
+    // Settings, with no vault, asks in it too.
+    click(&mut rt, "nav-settings");
+    settle(&mut rt);
+    assert_eq!(label_of(&rt, "settings-vault"), "Not configured");
+    click(&mut rt, "settings-choose-vault");
+    assert!(
+        rt.state.vault_dialog && rt.find("vault-dialog").is_some(),
+        "Settings asks in the same dialog"
+    );
+}
+
+#[test]
+fn choosing_a_folder_uses_the_native_sheet_and_the_same_dialog() {
+    let mut rt = runtime(setup_state(VaultStatus::Missing));
+    settle(&mut rt);
+
+    click(&mut rt, "vault-choose");
+    let (kind, options) = rt.file_dialog().expect("the press asks for a folder");
+    assert_eq!(kind, rune::FileDialogKind::Folder);
+    assert_eq!(options.title, "Choose a notes folder");
+    assert_eq!(
+        options.directory.as_deref(),
+        Some(std::path::Path::new(VAULT)),
+        "the sheet starts where the dialog is looking"
+    );
+
+    rt.resolve_file_dialog(Some("/Users/you/Obsidian/Personal".into()))
+        .unwrap();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        rt.state.take_vault_intent(),
+        Some(VaultIntent::Use("/Users/you/Obsidian/Personal".to_owned())),
+        "a picked folder is used, not just remembered"
+    );
+    assert!(rt.state.vault_dialog, "it stays until the folder opens");
+    assert!(rt.state.vault_setup.busy);
+
+    // Cancelling changes nothing.
+    let mut rt = runtime(setup_state(VaultStatus::Missing));
+    settle(&mut rt);
+    click(&mut rt, "vault-choose");
+    rt.resolve_file_dialog(None).unwrap();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.take_vault_intent(), None);
+    assert!(!rt.state.vault_setup.busy);
+    assert!(rt.state.vault_dialog);
+}
+
+#[test]
+fn new_note_without_a_vault_asks_for_one_instead_of_complaining() {
+    let mut state = State::with_vault(VAULT);
+    state.ask_for_vault(VAULT, None);
+    state.vault_checked(VAULT, VaultStatus::Missing);
+    state.close_vault_dialog();
+    let mut rt = runtime(state);
+
+    rt.key(KeyEvent {
+        key: Key::Command('n'),
+        mods: Mods::default(),
+    });
+    rt.frame(1.0 / 60.0);
+
+    assert!(rt.state.vault_dialog, "⌘N opens the dialog");
+    assert_eq!(rt.state.action_error, None, "there is nothing to blame");
+    assert_eq!(rt.state.take_action(), None, "no note is created");
+}
+
+#[test]
+fn a_refusal_stays_in_the_dialog_with_the_reason_and_the_path() {
+    let mut state = setup_state(VaultStatus::Missing);
+    state.vault_failed("That folder is read-only.");
+    let mut rt = runtime(state);
+    settle(&mut rt);
+
+    assert!(rt.state.vault_dialog, "a refusal does not close the dialog");
+    assert!(!rt.state.vault_setup.busy, "Try again is possible");
+    assert_eq!(label_of(&rt, "vault-notice"), "That folder is read-only.");
+    assert_eq!(label_of(&rt, "vault-path"), VAULT, "the path is kept");
+}
+
+#[test]
+fn not_now_drops_a_folder_that_was_mid_open() {
+    let mut rt = runtime(setup_state(VaultStatus::Missing));
+    settle(&mut rt);
+
+    click(&mut rt, "vault-primary");
+    assert!(rt.state.vault_pending(), "the app has work queued");
+
+    click(&mut rt, "vault-not-now");
+    assert_eq!(rt.state.take_vault_intent(), None);
+    assert!(
+        !rt.state.vault_pending(),
+        "nothing opens after Not now, not even a queued folder"
+    );
 }

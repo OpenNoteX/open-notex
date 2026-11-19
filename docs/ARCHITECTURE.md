@@ -40,6 +40,7 @@ OS event → handler mutates &mut State → view(&State) → diff → layout →
 | Tasks, habits, habit days, reminders, recurrences, tags, links | SQLite | from oplog/export only |
 | Oplog | SQLite | append-only, never rewritten |
 | Settings | SQLite `meta` | defaults |
+| Chosen vault folder | `config.json` beside the database | no (one path, not data) |
 
 The database lives in the platform data directory, never inside the vault.
 
@@ -86,6 +87,29 @@ pub enum Evt {
   same save, keeping its id; a file named by hand keeps its name until its title
   changes. A slug already in use gets `-2`, never an overwrite.
 
+## First launch
+
+`State::vault` always holds the path the app would use, so the dialog always has
+a real value to show. Launch resolves it before the first frame:
+
+1. `--vault DIR` — strict: a missing path is `Load::Failed`, as before. It is an
+   override for one run and is never saved.
+2. `config.json`'s `vault`, when it is a directory.
+3. `config.json`'s path that is gone — the dialog, pre-filled with it and saying
+   "That folder is not there. Is the drive connected?". The default is *not*
+   used: an unmounted drive must not silently switch vaults.
+4. `~/Documents/Notes`, when it already exists — open it and save it.
+5. otherwise the dialog, pre-filled with `~/Documents/Notes`.
+
+The only setting file is
+`~/Library/Application Support/openNoteX/config.json`, beside the database and
+never inside the vault. `State::vault_dialog` is one modal for every entry
+point: first launch, the empty Notes list after **Not now**, Settings → Vault,
+and `⌘N` while no vault is open. Path validation, `Create folder`, the config
+write and the store start all happen in `apps/open-notex/src/vault.rs` and
+`open_vault`; the view only shows `VaultStatus`. Until a folder opens the list
+says "No vault yet", not an error.
+
 ## The shell
 
 `crates/notex-ui` owns every pixel. `State` holds the route, the two pane
@@ -103,10 +127,11 @@ tooltip.
 - The palette is three seeds — background, ink, accent — resolved by
   `Kit::from_palette_focus`. Nothing else is hand-picked, so light and dark
   cannot drift, and tests assert the accent and secondary text clear 3:1.
-- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes (empty and
-  with an open note), Projects, Settings, Search, loading and failed.
-  `cargo xtask snap` renders each through the real binary in both themes, then
-  asserts the tree still has the sidebar, the toolbar and a nav row.
+- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes (empty, with
+  an open note, and with no vault), the vault dialog, Settings (with and without
+  a vault), Search, loading and failed. `cargo xtask snap` renders each through
+  the real binary in both themes, then asserts the tree still has the sidebar,
+  the toolbar and a nav row.
 
 ### The store behind it
 

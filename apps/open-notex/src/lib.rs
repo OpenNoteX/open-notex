@@ -10,11 +10,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod update;
+pub mod vault;
 
 use notex_core::Availability;
 use notex_store::worker::{self, Cmd, Evt, Notify, StoreHandle, Worker};
 use notex_store::{StoreError, db};
-use notex_ui::{Action, Load, NoteRow, State};
+use notex_ui::{Action, Load, NoteRow, State, VaultIntent};
 use rune::{Tx, Waker};
 use thiserror::Error;
 
@@ -69,6 +70,9 @@ impl Session {
 pub enum ConnectError {
     #[error("The vault at {0} is missing.")]
     MissingVault(String),
+    /// The folder the dialog asked for cannot be used, in the dialog's words.
+    #[error("{0}")]
+    Refused(String),
     #[error("The store could not use its database: {0}")]
     Store(#[from] StoreError),
     #[error("The store could not prepare its database: {0}")]
@@ -119,6 +123,10 @@ pub fn start(
 
 /// `AppSpec::setup`: runs once, on the UI thread, with the waker the worker uses
 /// to ask `poll` for a frame.
+///
+/// Launch order: `--vault` (strict, never remembered) → the saved folder → a
+/// `~/Documents/Notes` that already exists → ask, with `~/Documents/Notes`
+/// pre-filled.
 pub fn setup(state: &mut State, waker: Waker) {
     // Snapshots and test scripts are pure scenes: no vault, no database, no
     // worker thread. This is also what keeps `cargo xtask snap` off a real vault.
@@ -130,10 +138,106 @@ pub fn setup(state: &mut State, waker: Waker) {
     // a frame, or the settings row would wait for the next keypress.
     WAKER.with(|slot| *slot.borrow_mut() = Some(waker.clone()));
 
-    let vault = PathBuf::from(&state.vault);
-    if let Ok(session) = start(state, &vault, &db_path(), Wake(waker)) {
+    let home = home_dir();
+    let app_support = app_support_dir(&home);
+    let db = app_support.join("notex.db");
+
+    // `--vault` is an override for this run, and it stays strict: asking for a
+    // path gets that path or the list pane's loud failure, never a dialog. It is
+    // deliberately not written to config.json.
+    if let Some(flag) = notex_ui::arg(rune::extra_args(), "vault") {
+        state.vault = flag.clone();
+        state.vault_open = true;
+        if let Ok(session) = start(state, &PathBuf::from(flag), &db, Wake(waker)) {
+            SESSION.with(|slot| *slot.borrow_mut() = Some(session));
+        }
+        return;
+    }
+
+    match vault::resolve(&home, &app_support) {
+        vault::Launch::Open(vault) => {
+            if let Err(error) = vault::remember(&app_support, &vault) {
+                // Not being able to remember does not stop this run.
+                eprintln!("openNoteX: the vault could not be remembered: {error}");
+            }
+            state.vault = vault.display().to_string();
+            state.vault_open = true;
+            if let Ok(session) = start(state, &vault, &db, Wake(waker)) {
+                SESSION.with(|slot| *slot.borrow_mut() = Some(session));
+            }
+        }
+        vault::Launch::Ask { path, notice } => {
+            state.ask_for_vault(path.display().to_string(), notice);
+        }
+    }
+}
+
+/// Open the folder the dialog asked for: validate, remember, then start the one
+/// store. A refusal leaves `state` in the dialog with the reason, so the person
+/// can pick again without losing the path they chose.
+pub fn open_vault(
+    state: &mut State,
+    intent: VaultIntent,
+    app_support: &Path,
+    db: &Path,
+    notify: impl Notify,
+) -> Result<Session, ConnectError> {
+    let (path, create) = match intent {
+        VaultIntent::Create(path) => (PathBuf::from(path), true),
+        VaultIntent::Use(path) => (PathBuf::from(path), false),
+    };
+    if let Err(reason) = vault::prepare(&path, app_support, create) {
+        state.vault_failed(reason.clone());
+        return Err(ConnectError::Refused(reason));
+    }
+    if let Err(error) = vault::remember(app_support, &path) {
+        let reason = format!("openNoteX could not remember that folder: {error}");
+        state.vault_failed(reason.clone());
+        return Err(ConnectError::Refused(reason));
+    }
+    // A failure from an earlier attempt is not this folder's failure.
+    state.load = Load::Ready;
+    match start(state, &path, db, notify) {
+        Ok(session) => {
+            state.vault_opened(path.display().to_string());
+            Ok(session)
+        }
+        Err(error) => {
+            state.load = Load::Ready;
+            state.vault_failed(error.to_string());
+            Err(error)
+        }
+    }
+}
+
+/// Answer the dialog: look at the folder once when it changed, then run the one
+/// intent. Split out from [`poll`] so a test never needs the thread-local
+/// session, and so `poll` stays a drain.
+fn drive_vault(state: &mut State) -> bool {
+    let home = home_dir();
+    let app_support = app_support_dir(&home);
+    let mut changed = false;
+
+    if state.vault_setup.needs_check {
+        let path = state.vault_setup.path.clone();
+        let status = vault::inspect(&path, &app_support);
+        state.vault_checked(&path, status);
+        changed = true;
+    }
+
+    let Some(intent) = state.take_vault_intent() else {
+        return changed;
+    };
+    let db = app_support.join("notex.db");
+    let wake = WAKER.with(|slot| slot.borrow().clone());
+    let Some(wake) = wake else {
+        state.vault_failed("Opening a folder needs a window.");
+        return true;
+    };
+    if let Ok(session) = open_vault(state, intent, &app_support, &db, Wake(wake)) {
         SESSION.with(|slot| *slot.borrow_mut() = Some(session));
     }
+    true
 }
 
 /// `AppSpec::poll`: advances the editor's clocks, tells Rune when to wake for an
@@ -141,6 +245,11 @@ pub fn setup(state: &mut State, waker: Waker) {
 /// app draws nothing.
 pub fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut changed = state.tick(now);
+    // The dialog is answered here, before the worker drains, so a folder chosen
+    // this frame has its first reply pumped in the same frame.
+    if state.vault_pending() {
+        changed |= drive_vault(state);
+    }
     // A dirty draft that is waiting out its idle delay needs one wake to save
     // it; a clean or blocked one schedules nothing, so the app can sleep.
     if let Some(wait) = state.next_wake() {
@@ -434,10 +543,15 @@ pub fn wants_version(args: &[String]) -> bool {
 }
 
 pub fn db_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    app_support_dir(&home_dir()).join("notex.db")
+}
+
+/// `$HOME`, or the current directory when it is unset. One place, so the
+/// database and the default vault never disagree about which home they mean.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    app_support_dir(&home).join("notex.db")
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(target_os = "macos")]

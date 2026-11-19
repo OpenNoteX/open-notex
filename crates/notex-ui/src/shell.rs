@@ -3,7 +3,9 @@
 //! Nothing here reads the clock, the database or the filesystem. Handlers only
 //! mutate [`State`], and the next frame is the layout of that state.
 
-use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
+use rune::{
+    Align, Cx, El, FileDialogOptions, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text,
+};
 use rune_kit::shell::{
     RowStatus, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar,
 };
@@ -51,6 +53,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     let mut layer = Vec::new();
     delete_dialog(s, &k, &mut layer);
+    vault_dialog(s, &k, &mut layer);
     rune_kit::root(base, layer)
 }
 
@@ -94,6 +97,145 @@ fn delete_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
         .fit()
         .open(true)
         .on_close(|s: &mut State| s.cancel_delete())
+        .child(actions)
+        .build(k, layer);
+}
+
+/// The one place a vault is chosen or created.
+///
+/// First launch, the empty list after "Not now", Settings and `⌘N` with no vault
+/// all open this same dialog, so the copy, the validation and the way back
+/// cannot drift apart.
+fn vault_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
+    let c = &k.c;
+    let setup = &s.vault_setup;
+    let status = setup.status.summary();
+    // A refusal often repeats what the status already says ("That is a file, not
+    // a folder."). One line is enough.
+    let notice = setup.notice.as_deref().filter(|notice| *notice != status);
+
+    let mut body = col()
+        .key("vault-dialog-body")
+        .w_full()
+        .px(16.0)
+        .pt(12.0)
+        .pb(4.0)
+        .gap(8.0)
+        .child(
+            text("openNoteX reads that folder, and nothing else is stored anywhere.")
+                .key("vault-intro")
+                .font(k.ty.text_xsmall)
+                .color(c.text_muted)
+                .wrap(),
+        )
+        .child(
+            text("FOLDER")
+                .key("vault-folder-label")
+                .font(k.ty.text_xsmall)
+                .color(c.text_faint),
+        )
+        .child(
+            row()
+                .key("vault-path-row")
+                .w_full()
+                .padding(8.0)
+                .radius(k.radius.md)
+                .fill(c.layer_02)
+                .border(1.0, c.border_weak)
+                .child(
+                    text(setup.path.clone())
+                        .key("vault-path")
+                        .font(k.ty.small)
+                        .color(c.text_base)
+                        .truncate(),
+                ),
+        )
+        .child(
+            text(status)
+                .key("vault-status")
+                .font(k.ty.text_xsmall)
+                .color(if setup.status.can_open() {
+                    c.text_muted
+                } else {
+                    c.danger.fg
+                })
+                .wrap(),
+        );
+
+    if let Some(notice) = notice {
+        body = body.child(
+            text(notice.to_owned())
+                .key("vault-notice")
+                .font(k.ty.text_xsmall)
+                .color(c.danger.fg)
+                .wrap(),
+        );
+    }
+
+    let busy = setup.busy;
+    // The sheet opens where the dialog is looking, so the suggested folder is
+    // one Return away. `start` is owned by the handler, which outlives the frame.
+    let start = setup.path.clone();
+    let choose = Button::new("Choose…")
+        .variant(ButtonVariant::Outline)
+        .control_size(ControlSize::Small)
+        .disabled(busy)
+        .on_press_tx(move |_s: &mut State, tx: &mut Tx| {
+            let options = FileDialogOptions {
+                title: "Choose a notes folder".to_owned(),
+                directory: Some(std::path::PathBuf::from(start.clone())),
+                ..FileDialogOptions::default()
+            };
+            tx.open_folder(options, |s: &mut State, result, _| match result {
+                Ok(Some(path)) => s.choose_vault(path.to_string_lossy().into_owned()),
+                Ok(None) => {}
+                Err(error) => s.vault_failed(format!("The folder chooser did not open: {error}")),
+            });
+        })
+        .build(k)
+        .key("vault-choose");
+
+    let primary = Button::new(setup.status.primary_label())
+        .variant(ButtonVariant::Submit)
+        .control_size(ControlSize::Small)
+        .disabled(busy || !setup.status.can_open())
+        .on_press(|s: &mut State| s.vault_primary())
+        .build(k)
+        .key("vault-primary");
+
+    // macOS order: the way out on the left, the decision on the right.
+    let actions = row()
+        .key("vault-actions")
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .justify_between()
+        .child(
+            Button::new("Not now")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.close_vault_dialog())
+                .build(k)
+                .key("vault-not-now"),
+        )
+        .child(
+            row()
+                .key("vault-decide")
+                .gap(8.0)
+                .child(choose)
+                .child(primary),
+        );
+
+    Dialog::new("vault", "Where should your notes live?")
+        .description("Every note is a Markdown file in a folder you own.")
+        .width(460.0)
+        .fit()
+        // A stray click must not leave a first-run app in limbo. "Not now" is
+        // the deliberate exit.
+        .click_outside(false)
+        .open(s.vault_dialog)
+        .on_close(|s: &mut State| s.close_vault_dialog())
+        .child(body)
         .child(actions)
         .build(k, layer);
 }
@@ -221,11 +363,17 @@ fn list_pane(s: &State, k: &Kit) -> El {
         )
         .child(el().key("list-divider").w_full().h(1.0).fill(c.border_weak))
         .children(s.action_error.as_ref().map(|error| action_error(error, k)))
-        .child(match &s.load {
-            Load::Ready if s.route == Route::Notes && !s.notes.is_empty() => note_list(s, k),
-            Load::Ready => empty_list(s, k),
-            Load::Loading => loading(k),
-            Load::Failed(message) => failed_message(k, message),
+        .child(if s.vault_open {
+            match &s.load {
+                Load::Ready if s.route == Route::Notes && !s.notes.is_empty() => note_list(s, k),
+                Load::Ready => empty_list(s, k),
+                Load::Loading => loading(k),
+                Load::Failed(message) => failed_message(k, message),
+            }
+        } else {
+            // No vault means no notes on any list route. Saying "Nothing yet"
+            // there would blame the vault for being empty.
+            no_vault(k)
         })
 }
 
@@ -341,6 +489,44 @@ fn empty_list(s: &State, k: &Kit) -> El {
         );
     }
     body
+}
+
+/// The list pane before a folder is chosen. One button, because the dialog does
+/// the work and asking twice would be two answers to one question.
+fn no_vault(k: &Kit) -> El {
+    let c = &k.c;
+    col()
+        .key("list-no-vault")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .padding(20.0)
+        .center()
+        .gap(8.0)
+        .child(icon(&crate::icons::PROJECTS, 20.0).color(c.icon_faint))
+        .child(
+            text("No vault yet")
+                .key("list-no-vault-title")
+                .font(k.ty.small)
+                .color(c.text_faint),
+        )
+        .child(
+            text("openNoteX needs a folder for your Markdown files.")
+                .key("list-no-vault-hint")
+                .font(k.ty.text_xsmall)
+                .color(c.text_faint)
+                .align(Align::Center)
+                .wrap()
+                .max_w(240.0),
+        )
+        .child(
+            Button::new("Choose vault…")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.open_vault_dialog())
+                .build(k)
+                .key("list-no-vault-choose"),
+        )
 }
 
 fn loading(k: &Kit) -> El {
@@ -675,6 +861,15 @@ fn centered(key: &str, lead: El, message: &str, k: &Kit) -> El {
 /// The empty detail pane: what would be here, and why it is not.
 fn empty_detail(s: &State, k: &Kit) -> El {
     let c = &k.c;
+    // "No notes yet" blames a vault that is not there. With no vault, say so.
+    let (title, hint) = if s.route == Route::Notes && !s.vault_open {
+        (
+            "No vault yet",
+            "Choose a folder and its Markdown files appear here.",
+        )
+    } else {
+        (s.route.empty_title(), s.route.empty_hint())
+    };
     let mut body = col()
         .key("detail")
         .w_full()
@@ -685,7 +880,7 @@ fn empty_detail(s: &State, k: &Kit) -> El {
         .gap(10.0)
         .child(badge(s.route, k))
         .child(
-            text(s.route.empty_title())
+            text(title)
                 .key("detail-title")
                 .font(k.ty.ui_medium)
                 .color(c.text_base)
@@ -694,7 +889,7 @@ fn empty_detail(s: &State, k: &Kit) -> El {
                 .max_w(360.0),
         )
         .child(
-            text(s.route.empty_hint())
+            text(hint)
                 .key("detail-hint")
                 .font(k.ty.small)
                 .color(c.text_muted)
@@ -704,14 +899,25 @@ fn empty_detail(s: &State, k: &Kit) -> El {
         );
 
     if s.route == Route::Notes {
-        body = body.child(
-            text(format!("Vault · {}", s.vault))
-                .key("detail-vault")
-                .font(k.ty.text_xsmall)
-                .color(c.text_faint)
-                .truncate()
-                .max_w(340.0),
-        );
+        if s.vault_open {
+            body = body.child(
+                text(format!("Vault · {}", s.vault))
+                    .key("detail-vault")
+                    .font(k.ty.text_xsmall)
+                    .color(c.text_faint)
+                    .truncate()
+                    .max_w(340.0),
+            );
+        } else {
+            body = body.child(
+                Button::new("Choose vault…")
+                    .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut State| s.open_vault_dialog())
+                    .build(k)
+                    .key("detail-choose-vault"),
+            );
+        }
     }
 
     body
@@ -779,7 +985,7 @@ fn settings(s: &State, k: &Kit, dark: bool) -> El {
 
     panel = panel
         .child(text("Workspace").font(k.ty.ui_medium).color(c.text_base))
-        .child(setting_row(k, "Vault", &s.vault))
+        .child(vault_setting(s, k))
         .child(setting_row(
             k,
             "Appearance",
@@ -880,6 +1086,45 @@ fn update_row(s: &State, k: &Kit) -> El {
                 .on_press(|s: &mut State| s.request_update_check())
                 .build(k)
                 .key("update-check"),
+        )
+}
+
+/// Settings' Vault row. A working vault is a fact to read; no vault is a
+/// question with the same dialog behind it as first launch.
+fn vault_setting(s: &State, k: &Kit) -> El {
+    if s.vault_open {
+        return setting_row(k, "Vault", &s.vault);
+    }
+    let c = &k.c;
+    row()
+        .key("settings-vault-row")
+        .w_full()
+        .py(10.0)
+        .px(14.0)
+        .gap(12.0)
+        .radius(k.radius.md)
+        .fill(c.layer_01)
+        .border(1.0, c.border_weak)
+        .center_y()
+        .justify_between()
+        .child(
+            col()
+                .gap(2.0)
+                .child(text("Vault").font(k.ty.ui).color(c.text_base))
+                .child(
+                    text("Not configured")
+                        .key("settings-vault")
+                        .font(k.ty.small)
+                        .color(c.text_faint),
+                ),
+        )
+        .child(
+            Button::new("Choose vault…")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut State| s.open_vault_dialog())
+                .build(k)
+                .key("settings-choose-vault"),
         )
 }
 

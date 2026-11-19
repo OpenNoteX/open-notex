@@ -143,3 +143,31 @@ up within two seconds, not within milliseconds, and the app wakes at most twice 
 second while a vault is open. *Reopen when* the filesystem is the bottleneck —
 a 50k vault, or a pass that competes with a save — at which point FSEvents earns
 its dependency and its `unsafe` exemption.
+
+## 0016 — The vault is chosen once and remembered beside the database
+
+A notes app whose first frame is an error is not usable, so launch resolves a
+vault before the window draws and asks in one dialog when there is none. The
+choice is written to `~/Library/Application Support/openNoteX/config.json` —
+with the database and the trash, never inside the vault, where it would be
+indexed and would leave with the folder. `--vault` outranks the file for one run
+and is never persisted: a developer override must not become the next launch's
+vault. A saved path that is gone is not replaced by the default; the dialog
+keeps it and names the likely cause, because an unplugged drive must not look
+like a folder someone moved. Markdown files stay the source of truth: the config
+holds one path, and losing it costs one choice, not a note. *Reopen when*
+changing a working vault lands: that flow also has to reindex the new folder and
+prune the old rows, and it belongs with its own tests.
+
+## 0017 — The folder picker is the system panel, through Rune's native-file-dialog
+
+"Choose…" has to be the real macOS folder sheet: a hand-drawn file browser would
+be a second, worse Finder and would need its own permission handling. Rune
+already wraps `rfd`, so the app enables the `native-file-dialog` feature instead
+of adding a dialog crate of its own — that puts `rfd` (and `dbus` on Linux) in
+the lockfile, which is why this is an entry and not a Cargo line. The system
+panel brings its own **New Folder** button, so there is no save-panel flow and no
+second way to create a vault. Headless runs never touch it: the runtime answers
+with a scripted path, so tests and snapshots stay display-free. *Reopen when* the
+app targets Windows or Linux: `rfd` covers both, but the sheet's behaviour and
+permissions are then a platform test, not a macOS one.

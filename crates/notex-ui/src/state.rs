@@ -209,6 +209,84 @@ impl Update {
     }
 }
 
+/// What the folder the vault dialog is showing actually is.
+///
+/// The dialog is the only place that asks, so it is also the only place that has
+/// to name the answer. `Unusable` carries the sentence the person reads, because
+/// only the layer that looked at the disk knows why it said no.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum VaultStatus {
+    #[default]
+    Missing,
+    Empty,
+    Notes(usize),
+    Unusable(String),
+}
+
+impl VaultStatus {
+    /// The line under the path.
+    pub fn summary(&self) -> String {
+        match self {
+            VaultStatus::Missing => "This folder does not exist yet.".to_owned(),
+            VaultStatus::Empty => "This folder is empty. It becomes your vault.".to_owned(),
+            VaultStatus::Notes(1) => "1 note here.".to_owned(),
+            VaultStatus::Notes(count) => format!("{count} notes here."),
+            VaultStatus::Unusable(reason) => reason.clone(),
+        }
+    }
+
+    /// The primary button. Only a folder that does not exist is created; a
+    /// folder that is there is used as it is.
+    pub fn primary_label(&self) -> &'static str {
+        match self {
+            VaultStatus::Missing => "Create folder",
+            VaultStatus::Empty | VaultStatus::Notes(_) | VaultStatus::Unusable(_) => {
+                "Use this folder"
+            }
+        }
+    }
+
+    /// Whether a press on the primary button can do anything.
+    pub fn can_open(&self) -> bool {
+        !matches!(self, VaultStatus::Unusable(_))
+    }
+}
+
+/// The vault dialog's own state. `path` is what it would use, so the default is
+/// always a real value, even after "Not now".
+pub struct VaultSetup {
+    pub path: String,
+    pub status: VaultStatus,
+    /// Why the last attempt failed, in a sentence. Shown beside the status line.
+    pub notice: Option<String>,
+    /// An open or create is out; the buttons wait.
+    pub busy: bool,
+    /// The app has not looked at `path` since it changed.
+    pub needs_check: bool,
+}
+
+impl VaultSetup {
+    fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            status: VaultStatus::Missing,
+            notice: None,
+            busy: false,
+            needs_check: false,
+        }
+    }
+}
+
+/// What the app should do about the vault. Separate from [`Action`] because
+/// opening a vault replaces the session; `poll` owns both, and the view neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultIntent {
+    /// Make the folder, then open it. The primary button for a missing path.
+    Create(String),
+    /// Open a folder that is already there.
+    Use(String),
+}
+
 pub struct State {
     /// What the content pane is showing.
     pub route: Route,
@@ -248,6 +326,16 @@ pub struct State {
     clock: f64,
     /// Where notes live, for display. The app opens it; the UI only shows it.
     pub vault: String,
+    /// A vault is open, so creating, deleting and listing can happen. False only
+    /// between launch and the person choosing or creating a folder.
+    pub vault_open: bool,
+    /// The setup dialog is up. One flag for first launch, the empty list, Settings
+    /// and any action that needs a vault.
+    pub vault_dialog: bool,
+    /// The dialog's path, status and last refusal.
+    pub vault_setup: VaultSetup,
+    /// An open or create the app has not handled yet.
+    vault_intent: Option<VaultIntent>,
     /// Build identity, shown in Settings.
     pub version: &'static str,
 }
@@ -258,6 +346,7 @@ impl State {
     }
 
     pub fn with_vault(vault: impl Into<String>) -> Self {
+        let vault = vault.into();
         Self {
             route: Route::Today,
             sidebar: PaneState::new(216.0).range(180.0, 320.0),
@@ -277,7 +366,11 @@ impl State {
             release_requested: None,
             save_requested: false,
             clock: 0.0,
-            vault: vault.into(),
+            vault: vault.clone(),
+            vault_open: true,
+            vault_dialog: false,
+            vault_setup: VaultSetup::new(vault),
+            vault_intent: None,
             version: env!("CARGO_PKG_VERSION"),
         }
     }
@@ -445,11 +538,127 @@ impl State {
         self.pending_new = false;
         self.pending_delete = None;
         self.confirm_delete = None;
+        self.vault_intent = None;
+        self.vault_setup.busy = false;
+    }
+
+    /// Launch found no usable vault. The dialog opens on `path`, keeping the
+    /// saved one when it is there, so nothing falls back silently.
+    pub fn ask_for_vault(&mut self, path: impl Into<String>, notice: Option<String>) {
+        self.vault = path.into();
+        self.vault_open = false;
+        self.vault_dialog = true;
+        self.vault_setup = VaultSetup::new(self.vault.clone());
+        self.vault_setup.notice = notice;
+        self.vault_setup.needs_check = true;
+    }
+
+    /// Every surface that says "no vault" calls this, so there is one dialog and
+    /// one set of rules behind all of them.
+    pub fn open_vault_dialog(&mut self) {
+        self.vault_dialog = true;
+        self.vault_setup.path = self.vault.clone();
+        self.vault_setup.notice = None;
+        self.vault_setup.busy = false;
+        self.vault_setup.needs_check = true;
+    }
+
+    /// "Not now". The app stays open; the way back is the same dialog. A folder
+    /// that was mid-open is dropped too: saying no must not open one anyway.
+    pub fn close_vault_dialog(&mut self) {
+        self.vault_dialog = false;
+        self.vault_setup.busy = false;
+        self.vault_intent = None;
+    }
+
+    /// The app looked at the folder. A stale answer (the path moved on while the
+    /// disk was being read) is dropped.
+    pub fn vault_checked(&mut self, path: &str, status: VaultStatus) {
+        if self.vault_setup.path == path {
+            self.vault_setup.status = status;
+            self.vault_setup.needs_check = false;
+        }
+    }
+
+    /// The dialog's primary button. A missing folder is created; anything else
+    /// is used as it is. An unusable one has a disabled button, so this cannot
+    /// be reached for it, but the guard keeps the rule in one place.
+    pub fn vault_primary(&mut self) {
+        if self.vault_setup.busy || !self.vault_setup.status.can_open() {
+            return;
+        }
+        let path = self.vault_setup.path.clone();
+        self.vault_setup.notice = None;
+        self.vault_setup.busy = true;
+        let intent = match &self.vault_setup.status {
+            VaultStatus::Missing => VaultIntent::Create(path),
+            _ => VaultIntent::Use(path),
+        };
+        self.vault_intent = Some(intent);
+    }
+
+    /// The system folder sheet answered with a folder. It is used straight away:
+    /// picking one and then pressing "Use" again would be two answers to one
+    /// question. A refusal comes back as [`State::vault_failed`].
+    pub fn choose_vault(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        self.vault_setup.path = path.clone();
+        self.vault_setup.notice = None;
+        self.vault_setup.busy = true;
+        self.vault_setup.needs_check = true;
+        self.vault_intent = Some(VaultIntent::Use(path));
+    }
+
+    /// The folder could not be created, remembered or opened. The dialog stays
+    /// up with the reason, and the path is kept so Try again is one press.
+    pub fn vault_failed(&mut self, reason: impl Into<String>) {
+        self.vault_setup.busy = false;
+        self.vault_setup.notice = Some(reason.into());
+        self.vault_setup.needs_check = true;
+    }
+
+    /// The vault is open: the dialog closes and the list loads itself.
+    pub fn vault_opened(&mut self, path: impl Into<String>) {
+        self.vault = path.into();
+        self.vault_open = true;
+        self.vault_dialog = false;
+        self.vault_intent = None;
+        self.vault_setup = VaultSetup::new(self.vault.clone());
+        self.load = Load::Loading;
+        self.action_error = None;
+        // The old vault's rows are not this vault's rows.
+        self.notes.clear();
+        self.selected = None;
+        self.body = NoteBody::None;
+        self.draft = None;
+        self.pending_open = None;
+        self.pending_new = false;
+        self.pending_delete = None;
+        self.confirm_delete = None;
+    }
+
+    /// The next open or create the app should run, if any. `poll` takes it;
+    /// `pump` and [`Action`] never see it.
+    pub fn take_vault_intent(&mut self) -> Option<VaultIntent> {
+        self.vault_intent.take()
+    }
+
+    /// Whether the app has vault work this frame: a folder to look at, or an
+    /// open/create to run. `poll` skips the disk entirely when this is false.
+    pub fn vault_pending(&self) -> bool {
+        self.vault_setup.needs_check || self.vault_intent.is_some()
     }
 
     /// New note (`⌘N` and the list's button). A dirty draft is written first, so
-    /// the note being left is never abandoned.
+    /// the note being left is never abandoned. Without a vault there is nowhere
+    /// to write, so the honest answer is the setup dialog, not an error.
     pub fn request_create(&mut self) {
+        if !self.vault_open {
+            if !self.vault_dialog {
+                self.open_vault_dialog();
+            }
+            return;
+        }
         self.action_error = None;
         self.pending_new = true;
         if self.draft.as_ref().is_some_and(Draft::is_dirty) {
@@ -460,6 +669,12 @@ impl State {
     /// Ask before deleting the selected note. Nothing happens until
     /// [`State::confirm_delete`].
     pub fn request_delete(&mut self) {
+        if !self.vault_open {
+            if !self.vault_dialog {
+                self.open_vault_dialog();
+            }
+            return;
+        }
         if let Some(id) = &self.selected {
             self.action_error = None;
             self.confirm_delete = Some(id.clone());

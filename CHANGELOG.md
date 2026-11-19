@@ -8,6 +8,16 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- First launch asks where notes live instead of showing an error when the
+  folder is missing. One dialog offers the suggested `~/Documents/Notes`,
+  **Choose…** (the macOS folder sheet) and **Not now**; **Create folder** makes
+  the folder and opens it. The choice is remembered in
+  `~/Library/Application Support/openNoteX/config.json`, beside the database and
+  never in the vault. The same dialog is one press away from the empty Notes
+  list, Settings → Vault, and `⌘N` while no vault is open. A folder that is
+  missing, read-only, a file, or inside the app's own data is named in the
+  dialog and not opened. `--vault` still outranks the saved choice for one run
+  and is never stored.
 - Settings → Updates: **Check now** asks GitHub for the latest release and says
   whether a newer one exists; a newer one becomes a banner naming the version,
   with a button that opens its release page. Nothing is asked on launch — the
