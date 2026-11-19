@@ -25,6 +25,8 @@ pub struct NoteSummary {
     pub path: std::path::PathBuf,
     pub title: String,
     pub tags: Vec<String>,
+    /// The file's modification time, so Home can order notes by recency.
+    pub mtime_ns: i64,
 }
 
 pub fn upsert_note(
@@ -477,7 +479,7 @@ pub fn note_count(conn: &Connection) -> Result<i64, StoreError> {
 /// small enough to hold, and cheap to rebuild from the vault.
 pub fn notes(conn: &Connection) -> Result<Vec<NoteSummary>, StoreError> {
     let mut statement = conn.prepare_cached(
-        "SELECT id, path, title, tags
+        "SELECT id, path, title, tags, mtime_ns
          FROM note_index
          ORDER BY title COLLATE NOCASE, path",
     )?;
@@ -490,6 +492,7 @@ pub fn notes(conn: &Connection) -> Result<Vec<NoteSummary>, StoreError> {
                 path: std::path::PathBuf::from(row.get::<_, String>(1)?),
                 title: row.get(2)?,
                 tags: serde_json::from_str(&tags).unwrap_or_default(),
+                mtime_ns: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

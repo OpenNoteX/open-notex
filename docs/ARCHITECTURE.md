@@ -119,19 +119,22 @@ does nothing else — no I/O, no clock, no history. `apps/open-notex` supplies t
 and the sidebar toggle, which stays Rune's so it matches its own button and
 tooltip.
 
-- `Route` is one enum of ten screens, and it is the only source of the sidebar
-  row, the toolbar title, the empty-state copy, the icon and the `--route`
-  value. A screen cannot exist in one place and not the others.
-- Search and Settings are single-pane; every other route is sidebar, list and
-  detail, decided by `Route::has_detail`.
+- `Route` is one enum of eight screens, and it is the only source of the
+  sidebar row, the toolbar title, the empty-state copy, the icon and the
+  `--route` value. A screen cannot exist in one place and not the others.
+- `Route::layout` says how a screen fills the window: `Dashboard` (Home),
+  `List` (Tasks, Tags, Habits, Reminders), `ListDetail` (Notes is the only one)
+  and `Page` (Search, Settings). Projects are not a route: they are a filter
+  chip inside Tasks.
 - The palette is three seeds — background, ink, accent — resolved by
   `Kit::from_palette_focus`. Nothing else is hand-picked, so light and dark
   cannot drift, and tests assert the accent and secondary text clear 3:1.
-- `SCENES` is the snapshot contract: Today, an empty Inbox, Notes (empty, with
+- `SCENES` is the snapshot contract: Home (full and empty), Tasks (full, empty,
+  filtered, one row expanded, the undo toast, the archive), Notes (empty, with
   an open note, and with no vault), the vault dialog, Settings (with and without
-  a vault), Search, loading and failed. `cargo xtask snap` renders each through
-  the real binary in both themes, then asserts the tree still has the sidebar,
-  the toolbar and a nav row.
+  a vault, and an update), Search, loading and failed. `cargo xtask snap`
+  renders each through the real binary in both themes, then asserts the tree
+  still has the sidebar, the toolbar and a nav row.
 
 ### The store behind it
 
@@ -199,6 +202,33 @@ note's id; a name already in use gets a `-2`, never a clobber.
   and wait up to 750 ms for the file. Rune cannot cancel a quit, so a draft the
   disk still refuses is written to `~/Library/Application Support/openNoteX/
   recovery/` as a note with its id, and the path goes to stderr.
+
+### Home and the checklist
+
+Home is the default screen and answers "what now" before "where do I go": a
+full-width clock block, then one block holding Todo (overdue and due today),
+Reminders and Next up, then Recent notes. Reminders is honest about being a
+later milestone; it does not invent rows. Recent notes is ordered by the file's
+`mtime_ns`, not `updated_at`, which is the time the index last looked at a file.
+
+Tasks is one checklist, not a board. Open tasks are grouped `Overdue / Today /
+Upcoming / No date` by `notex_time::checklist::bucket`, and the project chips
+above the list are a filter. Only "All" and real projects exist — there is no
+inbox, stage or drag order to keep in sync. The add row is one borderless field:
+`Return` adds the task and leaves the caret in place, and `#name` files the task
+under a project, creating it when the name is new (`notex_core::parse_task_input`).
+The due chip is a person's words ("2d late", "Fri", "23 Nov"); completing a task
+shows an eight-second toast whose Undo reopens it, and the archive groups done
+tasks by the local day they were completed.
+
+- A task's due date is `due_day`, a local calendar date. `due_at` stays NULL for
+  an all-day task; a time-of-day task is a later milestone and does not reuse
+  the column with a fake hour.
+- `view()` never reads the clock. `apps/open-notex` fills `State::now` from
+  `notex_time::local_stamp` at most once a minute, and a headless scene keeps
+  its own fixed clock, so a snapshot does not depend on the hour it was taken.
+- Every task write goes through the worker and appends its oplog row in the same
+  transaction as the row it changes, like a note save.
 
 ## Time
 

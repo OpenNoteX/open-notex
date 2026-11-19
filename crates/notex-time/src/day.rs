@@ -4,7 +4,7 @@
 //! day start. The default start is 04:00, so work finished at 01:00 counts for the
 //! previous day, which is how people talk about it.
 
-use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use thiserror::Error;
 
@@ -45,6 +45,36 @@ impl DayPolicy {
 pub fn parse_tz(name: &str) -> Result<Tz, TimeError> {
     name.parse::<Tz>()
         .map_err(|_| TimeError::Timezone(name.to_owned()))
+}
+
+/// The clock and date a person reads on Home.
+///
+/// The app reads the wall clock and the system timezone; the view only draws
+/// these strings, so `view()` stays a pure function of state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamp {
+    /// `YYYY-MM-DD`, the day tasks are grouped against.
+    pub day: String,
+    /// `14:32`.
+    pub time: String,
+    /// `Thursday 19 November`.
+    pub date: String,
+}
+
+/// The system's local clock at `ts_ms`.
+pub fn local_stamp(ts_ms: i64) -> Result<Stamp, TimeError> {
+    let utc = DateTime::<Utc>::from_timestamp_millis(ts_ms).ok_or(TimeError::Timestamp(ts_ms))?;
+    let local = utc.with_timezone(&Local);
+    Ok(Stamp {
+        day: local.format("%Y-%m-%d").to_string(),
+        time: local.format("%H:%M").to_string(),
+        date: local.format("%A %-d %B").to_string(),
+    })
+}
+
+/// The local calendar day `ts_ms` falls on, for the archive's grouping.
+pub fn local_day(ts_ms: i64) -> Option<String> {
+    local_stamp(ts_ms).ok().map(|stamp| stamp.day)
 }
 
 /// The local day a timestamp belongs to, given a timezone and day start.
@@ -148,6 +178,23 @@ mod tests {
             let start = day_start_ms(day, tz, policy);
             assert_eq!(day_key(start, tz, policy).unwrap(), day);
         }
+    }
+
+    #[test]
+    fn the_local_stamp_is_a_day_a_clock_and_a_date() {
+        let ts = ts(2026, 11, 19, 14, 32);
+        let stamp = local_stamp(ts).unwrap();
+        assert_eq!(stamp.day.len(), 10, "{}", stamp.day);
+        assert!(
+            crate::checklist::parse_day(&stamp.day).is_some(),
+            "{}",
+            stamp.day
+        );
+        assert_eq!(stamp.time.len(), 5, "{}", stamp.time);
+        assert!(stamp.date.contains(' '), "{}", stamp.date);
+        assert_eq!(local_day(ts).as_deref(), Some(stamp.day.as_str()));
+        assert!(local_stamp(i64::MAX).is_err());
+        assert_eq!(local_day(i64::MAX), None);
     }
 
     #[test]

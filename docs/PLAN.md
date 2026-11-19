@@ -1,11 +1,13 @@
 # Plan
 
 Status: `0.0.1` pre-alpha. M0 (context, workspace, store, time, CI), M0.5
-(the shell), M1a (the store behind the shell), M1b (editing) and M1's create,
-delete, rename, vault watcher and first-launch vault choice are done. What
-remains of M1 is search and tags (`⌘K`, FTS in the shell) and the Obsidian
-import. M6a — a downloadable Mac app, the release pipeline and the update check —
-is landing ahead of the milestone order so the app can be installed and used.
+(the shell), M1a (the store behind the shell), M1b (editing), M1's create,
+delete, rename, vault watcher and first-launch vault choice, and M2a (Home and
+one tasks checklist) are done. What remains of M1 is search and tags (`⌘K`, FTS
+in the shell) and the Obsidian import; what remains of M2 is recurrence and
+carried-days. M6a — a downloadable Mac app, the release pipeline and the update
+check — is landing ahead of the milestone order so the app can be installed and
+used.
 
 One app, four primitives: **capture (notes) → plan (tasks) → repeat (habits) →
 remember (reminders)**. SQLite and a Markdown vault are the source of truth.
@@ -22,7 +24,8 @@ release (decision 0014).
 | M1b ✅ | Editing: the selected note is its Markdown file, edited in place; autosave after idle, `⌘S`, a hash conflict guard with Reload/Overwrite, frontmatter preserved | Type, wait, see the file change; edit the file in another editor and the save refuses rather than clobbering |
 | M1 | Notes as files: create/rename/delete ✅, watcher ✅, tags, FTS search, Obsidian import, ⌘K | Edit a note in another editor and see it reflected; delete the DB, `--reindex`, search is identical |
 | M1c ✅ | First launch: one dialog to create or choose the vault, remembered beside the database; every "no vault" surface reopens it | A fresh install creates `~/Documents/Notes` in one press and `⌘N` writes a `.md`; a vanished folder asks instead of switching |
-| M2 | Projects, tasks, Today, due dates, recurring tasks, reorder | Today matches reality after restart; recurrence correct across DST |
+| M2a ✅ | Home (clock, todo, reminders, next up, recent notes) and one tasks checklist: groups by due day, project chips, inline add/rename, due buttons, eight-second undo, archive | Add a task with `#project`, complete it, undo it, reopen it from the archive; a restart shows the same list grouped against the local day |
+| M2 | Recurring tasks and carried-over days on top of M2a | Recurrence correct across DST; a task missed yesterday is overdue today |
 | M3 | Habits, streak engine, heatmap, freezes, at-risk states | Property tests across four timezones; hand-checked streak cases |
 | M4 | Reminders, scheduler, notifications, tray, single instance, quick capture, snooze, click-through | Reminder fires with the window hidden; click focuses the item; missed-while-away digest |
 | M5 | Undo, structured-data export/import, backups, settings, accessibility pass, onboarding | Export → fresh install → import round-trips |

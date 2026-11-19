@@ -13,8 +13,10 @@ use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Spinner,
 };
 
-use crate::routes::{FOOTER, Route, SECTIONS};
+use crate::home;
+use crate::routes::{FOOTER, Layout, Route, SECTIONS};
 use crate::state::{Draft, DraftStatus, Load, NoteBody, State};
+use crate::tasks;
 use crate::theme;
 
 /// The window. `AppSpec::view`.
@@ -22,15 +24,37 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let dark = cx.system_dark();
     let k = theme::kit(dark);
 
-    // A list screen has a detail pane; a single-pane screen does not.
-    let split = if s.route.has_detail() {
-        SplitView::new(list_pane(s, &k)).inspector(
-            &s.detail,
-            |s: &mut State| &mut s.detail,
-            detail_pane(s, &k),
-        )
+    // Nothing that needs the vault draws its own content until there is one.
+    // Settings and Search are the exceptions: they have something to say with
+    // no data at all (a folder to choose; a field to type in).
+    let gate = if s.route == Route::Settings || s.route == Route::Search {
+        None
+    } else if !s.vault_open {
+        Some(no_vault(&k))
     } else {
-        SplitView::new(page_pane(s, &k, dark))
+        match &s.load {
+            Load::Loading => Some(loading(&k)),
+            Load::Failed(message) => Some(failed_message(&k, message)),
+            Load::Ready => None,
+        }
+    };
+
+    // The route decides the layout now: Home is blocks, Tasks is one list,
+    // Notes is the only list-with-detail, and the rest are single pages.
+    let split = if let Some(pane) = gate {
+        SplitView::new(pane)
+    } else {
+        match s.route.layout() {
+            Layout::Dashboard => SplitView::new(home::home_pane(s, &k)),
+            Layout::List if s.route == Route::Tasks => SplitView::new(tasks::tasks_pane(s, &k)),
+            Layout::List => SplitView::new(page_pane(s, &k, dark)),
+            Layout::ListDetail => SplitView::new(list_pane(s, &k)).inspector(
+                &s.detail,
+                |s: &mut State| &mut s.detail,
+                detail_pane(s, &k),
+            ),
+            Layout::Page => SplitView::new(page_pane(s, &k, dark)),
+        }
     };
 
     let base = split
@@ -54,6 +78,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut layer = Vec::new();
     delete_dialog(s, &k, &mut layer);
     vault_dialog(s, &k, &mut layer);
+    if let Some(toast) = tasks::undo_toast(s, &k) {
+        layer.push(toast);
+    }
     rune_kit::root(base, layer)
 }
 
@@ -301,7 +328,13 @@ fn sidebar(s: &State, k: &Kit) -> El {
 }
 
 fn nav_row(s: &State, route: Route, k: &Kit) -> El {
-    SidebarRow::new(route.label())
+    // The checklist's count is the one number the sidebar carries: it is what a
+    // person checks before opening the list.
+    let label = match route {
+        Route::Tasks if s.open_task_count() > 0 => format!("Tasks ({})", s.open_task_count()),
+        _ => route.label().to_owned(),
+    };
+    SidebarRow::new(label)
         .icon(route.icon())
         .selected(s.route == route)
         .on_select(move |s: &mut State, _| s.route = route)
@@ -503,7 +536,7 @@ fn no_vault(k: &Kit) -> El {
         .padding(20.0)
         .center()
         .gap(8.0)
-        .child(icon(&crate::icons::PROJECTS, 20.0).color(c.icon_faint))
+        .child(icon(&crate::icons::HOME, 20.0).color(c.icon_faint))
         .child(
             text("No vault yet")
                 .key("list-no-vault-title")

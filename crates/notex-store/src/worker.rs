@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::db::{self, StoreError};
 use crate::index;
+use crate::tasks;
 use crate::vault::{self, Note};
 
 /// How often the worker looks for edits made outside the app. Long enough that
@@ -61,6 +62,46 @@ pub enum Cmd {
     /// Read one note's body from its file (never from SQLite).
     OpenNote {
         id: String,
+    },
+    /// Tasks and the projects they are filed into. Tasks live only in SQLite,
+    /// so these two are read at launch and need no reindex.
+    ListTasks,
+    ListLists,
+    CreateTask {
+        title: String,
+        /// The name after `#` in the add row; an unknown one becomes a project.
+        project: Option<String>,
+        due_day: Option<String>,
+    },
+    SetTaskTitle {
+        id: String,
+        title: String,
+    },
+    SetTaskNotes {
+        id: String,
+        notes: String,
+    },
+    SetTaskDue {
+        id: String,
+        due_day: Option<String>,
+    },
+    SetTaskList {
+        id: String,
+        list_id: Option<String>,
+    },
+    SetTaskDone {
+        id: String,
+        done: bool,
+    },
+    DeleteTask {
+        id: String,
+    },
+    /// Undo a delete: the same soft-deleted row comes back.
+    RestoreTask {
+        id: String,
+    },
+    CreateList {
+        name: String,
     },
     Shutdown,
 }
@@ -113,6 +154,22 @@ pub enum Evt {
         err: String,
     },
     Notes(Vec<crate::index::NoteSummary>),
+    /// The full task list, open and done, for Tasks and the archive.
+    Tasks(Vec<crate::tasks::Task>),
+    /// Every project, in chip order.
+    Lists(Vec<crate::tasks::List>),
+    /// One task after a write. The UI replaces its row instead of re-reading.
+    TaskChanged(crate::tasks::Task),
+    /// The task is soft-deleted (or was never there): drop the row.
+    TaskGone {
+        id: String,
+    },
+    /// A project was created by `#name`, so the chips can show it.
+    ListChanged(crate::tasks::List),
+    /// A task write failed, in a sentence the row can show.
+    TaskFailed {
+        err: String,
+    },
     Opened {
         id: String,
         body: String,
@@ -370,6 +427,107 @@ fn execute(
             }],
             Err(error) => vec![Evt::OpenFailed {
                 id,
+                err: error.to_string(),
+            }],
+        },
+        Cmd::ListTasks => match tasks::tasks(conn) {
+            Ok(tasks) => vec![Evt::Tasks(tasks)],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::ListLists => match tasks::lists(conn) {
+            Ok(lists) => vec![Evt::Lists(lists)],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::CreateTask {
+            title,
+            project,
+            due_day,
+        } => match tasks::create(
+            conn,
+            &title,
+            project.as_deref(),
+            due_day.as_deref(),
+            now_ms(),
+            device,
+        ) {
+            Ok(created) => {
+                let mut events = Vec::with_capacity(2);
+                if let Some(list) = created.list {
+                    events.push(Evt::ListChanged(list));
+                }
+                events.push(Evt::TaskChanged(created.task));
+                events
+            }
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::SetTaskTitle { id, title } => {
+            match tasks::set_title(conn, &id, &title, now_ms(), device) {
+                Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+                Ok(None) => vec![Evt::TaskGone { id }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
+        Cmd::SetTaskNotes { id, notes } => {
+            match tasks::set_notes(conn, &id, &notes, now_ms(), device) {
+                Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+                Ok(None) => vec![Evt::TaskGone { id }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
+        Cmd::SetTaskDue { id, due_day } => {
+            match tasks::set_due(conn, &id, due_day.as_deref(), now_ms(), device) {
+                Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+                Ok(None) => vec![Evt::TaskGone { id }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
+        Cmd::SetTaskList { id, list_id } => {
+            match tasks::set_list(conn, &id, list_id.as_deref(), now_ms(), device) {
+                Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+                Ok(None) => vec![Evt::TaskGone { id }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
+        Cmd::SetTaskDone { id, done } => match tasks::set_done(conn, &id, done, now_ms(), device) {
+            Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+            Ok(None) => vec![Evt::TaskGone { id }],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::DeleteTask { id } => match tasks::delete(conn, &id, now_ms(), device) {
+            // Already gone is the same answer as deleted: drop the row.
+            Ok(_) => vec![Evt::TaskGone { id }],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::RestoreTask { id } => match tasks::restore(conn, &id, now_ms(), device) {
+            Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+            Ok(None) => vec![Evt::TaskFailed {
+                err: "That task could not be restored.".to_owned(),
+            }],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::CreateList { name } => match tasks::create_list(conn, &name, now_ms(), device) {
+            Ok(list) => vec![Evt::ListChanged(list)],
+            Err(error) => vec![Evt::TaskFailed {
                 err: error.to_string(),
             }],
         },

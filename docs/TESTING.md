@@ -82,6 +82,16 @@ assert!(rt.state.tasks[0].done);
   becomes `VaultIntent::Use` without a second press; a refusal keeps the dialog
   with the reason and the path. `take_vault_intent()` is asserted, not
   `take_action()`, because opening a vault replaces the session.
+- Home and Tasks: the clock block reads the scene's fixed time and date; the
+  Todo block holds overdue and today's rows while Next up holds later ones;
+  Recent notes is ordered by file mtime; the sidebar counts open tasks and has
+  no Inbox/Today/Upcoming/Projects row. The checklist groups `Overdue / Today /
+  Upcoming / No date`, the chips filter and add into the project they show,
+  `Return` in the add row asks for a task and keeps the field, clicking a title
+  renames in place (Escape cancels), completing shows the undo toast and its
+  Undo reopens the task, the eight-second expiry is counted on the virtual
+  clock, deleting is one press and a restore, the expanded row sets a due day
+  and a project, and the archive groups done tasks by the day they were done.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -107,6 +117,13 @@ assert!(rt.state.tasks[0].done);
   and keeps the id and the frontmatter. A file edited, added or deleted by
   another program reaches the open editor and the list while the app runs, with
   no command from the test: the worker's timer is what notices.
+- `apps/open-notex/tests/tasks.rs` covers tasks through the real worker and
+  database: a line in the add row becomes a row and a project; `#Launch` and
+  `#launch` are one project; a due day is written as a local date and its group
+  follows it; completing moves the task to the archive and a second launch on
+  the same database reads it back as done; a delete and its undo restore the
+  row, and letting the toast pass leaves it gone; a rename, a move to no
+  project and a task note all come back from a relist.
 - `apps/open-notex/tests/vault.rs` covers the launch and the dialog without a
   window: `--vault` aside, the saved folder wins over the suggested one, a saved
   folder that is gone asks and is never replaced by the default, a broken config

@@ -1757,6 +1757,8 @@ dependencies = [
 name = "notex-ui"
 version = "0.0.1"
 dependencies = [
+ "notex-core",
+ "notex-time",
  "rune",
  "rune-kit",
 ]
@@ -2185,6 +2187,7 @@ version = "0.0.1"
 dependencies = [
  "notex-core",
  "notex-store",
+ "notex-time",
  "notex-ui",
  "rune",
  "rune-kit",

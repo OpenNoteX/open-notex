@@ -171,3 +171,28 @@ second way to create a vault. Headless runs never touch it: the runtime answers
 with a scripted path, so tests and snapshots stay display-free. *Reopen when* the
 app targets Windows or Linux: `rfd` covers both, but the sheet's behaviour and
 permissions are then a platform test, not a macOS one.
+
+## 0018 — Tasks are one checklist, and a due day is a date
+
+The first sketch had four screens (Inbox, Today, Upcoming, Projects) and a board
+with stages. It made a person choose which inbox a task lived in before writing
+it, and it made "what do I do now" a tour of four lists. It is replaced by one
+checklist grouped by when a thing is due — `Overdue`, `Today`, `Upcoming`, `No
+date` — with projects demoted to a filter chip. There is no stage, no drag order
+and no carried-days field: a task missed on Monday is in `Overdue` on Tuesday
+because its due day is in the past, not because anything rewrote the row.
+
+A due date is `due_day`, a local `YYYY-MM-DD`, not a timestamp. An all-day task
+is a calendar fact, and storing midnight as a UTC instant makes it move when a
+person travels or the clock changes. Sorting, grouping and the words on the chip
+("2d late", "Fri", "23 Nov") all live in `notex_time::checklist`, which is pure
+and takes `today` as an argument, so tests and snapshots never read a clock.
+`due_at` stays NULL until a task has a time of day; that milestone will add the
+hours, not reinterpret this column.
+
+Task rows are structured data in SQLite, like habits and reminders will be —
+migrations and the oplog, not Markdown. Note *bodies* stay Markdown files, which
+is the invariant that matters: losing the database costs an index, not a note.
+Tasks are the app's own records and are exported from the oplog rather than
+scanned from the vault. *Reopen when* sync lands: the oplog is then the source
+for task rows on another machine, and this decision should name the export shape.

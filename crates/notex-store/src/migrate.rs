@@ -24,9 +24,14 @@ const MIGRATIONS: &[Migration] = &[
         name: "0002_fts_rowid",
         sql: include_str!("../migrations/0002_fts_rowid.sql"),
     },
+    Migration {
+        version: 3,
+        name: "0003_task_due_day",
+        sql: include_str!("../migrations/0003_task_due_day.sql"),
+    },
 ];
 
-pub const LATEST_VERSION: u32 = 2;
+pub const LATEST_VERSION: u32 = 3;
 
 pub fn run(conn: &Connection) -> Result<u32, StoreError> {
     let mut current: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
