@@ -12,7 +12,10 @@ pub mod theme;
 
 pub use routes::Route;
 pub use shell::{on_key, view};
-pub use state::{Action, Draft, DraftStatus, Load, NoteBody, NoteRow, SaveRequest, State, Update};
+pub use state::{
+    Action, Draft, DraftStatus, Load, NoteBody, NoteRow, SaveRequest, State, Update, VaultIntent,
+    VaultSetup, VaultStatus, arg,
+};
 
 pub const TITLE: &str = "openNoteX";
 pub const SIZE: (f32, f32) = (1120.0, 740.0);
@@ -103,6 +106,20 @@ pub const SCENES: &[Scene] = &[
         s.route = Route::Settings;
         s.load = Load::Ready;
         s.update_available("0.1.0");
+    }),
+    ("onboarding", |s| {
+        s.route = Route::Notes;
+        s.ask_for_vault("/Users/you/Documents/Notes", None);
+    }),
+    ("notes-no-vault", |s| {
+        s.route = Route::Notes;
+        s.ask_for_vault("/Users/you/Documents/Notes", None);
+        s.close_vault_dialog();
+    }),
+    ("settings-no-vault", |s| {
+        s.route = Route::Settings;
+        s.ask_for_vault("/Users/you/Documents/Notes", None);
+        s.close_vault_dialog();
     }),
     ("search", |s| {
         s.route = Route::Search;

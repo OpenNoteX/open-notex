@@ -75,6 +75,13 @@ assert!(rt.state.tasks[0].done);
   until `delete-confirm`; a refused create is explained under the list header.
   These assert `Action`s from `take_action()`; nothing in the test talks to a
   worker.
+- The vault dialog: the status line and primary label for a missing, empty,
+  counted and unusable folder; `Not now` leaves the shell open with "No vault
+  yet", and both its button and Settings → Vault reopen the same dialog; `⌘N`
+  without a vault opens it instead of raising an error; a scripted folder answer
+  becomes `VaultIntent::Use` without a second press; a refusal keeps the dialog
+  with the reason and the path. `take_vault_intent()` is asserted, not
+  `take_action()`, because opening a vault replaces the session.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -100,6 +107,15 @@ assert!(rt.state.tasks[0].done);
   and keeps the id and the frontmatter. A file edited, added or deleted by
   another program reaches the open editor and the list while the app runs, with
   no command from the test: the worker's timer is what notices.
+- `apps/open-notex/tests/vault.rs` covers the launch and the dialog without a
+  window: `--vault` aside, the saved folder wins over the suggested one, a saved
+  folder that is gone asks and is never replaced by the default, a broken config
+  asks instead of guessing, the choice round-trips through `config.json` beside
+  the database, `inspect` names missing/empty/counted/file/read-only/inside-app
+  folders, `prepare` creates only when asked, and `open_vault` creates and opens
+  a folder end to end (the first `⌘N` writes a real `.md`), indexes an existing
+  folder's notes, and refuses a read-only or app-data folder without remembering
+  it.
 - `lsof -iTCP -sTCP:LISTEN` on a running build must be empty.
 - Notification permission denied: the app degrades to in-app toasts and still
   records the fire.
