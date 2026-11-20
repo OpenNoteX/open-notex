@@ -8,6 +8,33 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- Home is the first screen: a full-width clock and date, then one block with
+  Todo (overdue first, then due today), Reminders (honest that they are a later
+  milestone) and Next up, then Recent notes ordered by the file's modification
+  time. Every block is a way into the screen that owns it.
+- Tasks is one checklist instead of four lists. Open tasks are grouped
+  `Overdue / Today / Upcoming / No date` by their local due day, with projects
+  as a filter chip row (`All`, each project, `+ Project`). There is no Inbox,
+  Today, Upcoming or Projects row in the sidebar; `Home` and `Tasks (n)` are.
+- Adding is one borderless row: `Return` writes the task and leaves the caret
+  there for the next one, and `#project` files it under a project, creating the
+  project when the name is new. A filtered list adds into the project it shows.
+- A row's title renames in place (`Return` saves, `Escape` puts it back). The
+  due chip reads as a person would say it — `2d late`, `Today`, `Tomorrow`,
+  `Fri`, `23 Nov` — and the chevron opens due buttons (Today, Tomorrow, Next
+  week, Clear), the project picker and a notes field.
+- Completing a task shows an eight-second toast whose **Undo** reopens it, and
+  deleting is one press with the same way back. Done tasks move to an archive
+  grouped by the day they were completed, where they can be reopened.
+- `notex-store`: a `tasks` table and `lists` (projects), `migrations/0003` with
+  `due_day` and a partial index for open tasks, and `Cmd::ListTasks`,
+  `ListLists`, `CreateTask`, `SetTaskTitle`, `SetTaskNotes`, `SetTaskDue`,
+  `SetTaskList`, `SetTaskDone`, `DeleteTask`, `RestoreTask` and `CreateList`.
+  Every write appends its oplog row in the same transaction. `NoteSummary`
+  carries `mtime_ns`, so Home can order notes by recency.
+- `notex-time`: `Bucket`, `bucket`, `due`, `day_label` and `add_days` for due
+  days, plus `local_stamp`/`local_day`, so the shell draws a clock it never
+  reads. `notex-core`: `parse_task_input`, which splits a `#project` from a line.
 - First launch asks where notes live instead of showing an error when the
   folder is missing. One dialog offers the suggested `~/Documents/Notes`,
   **Choose…** (the macOS folder sheet) and **Not now**; **Create folder** makes

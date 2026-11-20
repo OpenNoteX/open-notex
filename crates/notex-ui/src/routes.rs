@@ -1,17 +1,16 @@
 //! The sidebar's routes.
 //!
-//! A route is a navigation target, not data. Today, Inbox and Upcoming are views
-//! over the same tables; Projects lists `lists`; the rest are their own screens.
-//! Keeping them in one enum means the sidebar, the keyboard shortcuts and the
-//! snapshot scenes cannot drift apart.
+//! A route is a navigation target, not data. Home is the dashboard; Tasks is one
+//! checklist, grouped by when it is due, with projects as a filter inside it;
+//! Notes is the only route with a detail pane. Keeping them in one enum means
+//! the sidebar, the keyboard shortcuts and the snapshot scenes cannot drift
+//! apart.
 
 /// What the content pane is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {
-    Inbox,
-    Today,
-    Upcoming,
-    Projects,
+    Home,
+    Tasks,
     Notes,
     Tags,
     Habits,
@@ -20,14 +19,26 @@ pub enum Route {
     Settings,
 }
 
+/// How a route fills the window. The route decides the layout now; a route is
+/// not a promise of a list plus a detail pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// Home: blocks of the day, one scrolling column.
+    Dashboard,
+    /// Tasks, Tags, Habits, Reminders: one list, no detail pane.
+    List,
+    /// Notes: a list on the left, the open note on the right.
+    ListDetail,
+    /// Search and Settings: a single page.
+    Page,
+}
+
 impl Route {
     /// Every route, in sidebar order. The sidebar renders `SECTIONS`; this list
     /// exists so tests can assert nothing is missing or duplicated.
-    pub const ALL: [Route; 10] = [
-        Route::Inbox,
-        Route::Today,
-        Route::Upcoming,
-        Route::Projects,
+    pub const ALL: [Route; 8] = [
+        Route::Home,
+        Route::Tasks,
         Route::Notes,
         Route::Tags,
         Route::Habits,
@@ -40,10 +51,8 @@ impl Route {
     /// `--route` flag, so it must not change casually.
     pub const fn key(self) -> &'static str {
         match self {
-            Route::Inbox => "inbox",
-            Route::Today => "today",
-            Route::Upcoming => "upcoming",
-            Route::Projects => "projects",
+            Route::Home => "home",
+            Route::Tasks => "tasks",
             Route::Notes => "notes",
             Route::Tags => "tags",
             Route::Habits => "habits",
@@ -56,10 +65,8 @@ impl Route {
     /// The visible sidebar label. Also the accessible name.
     pub const fn label(self) -> &'static str {
         match self {
-            Route::Inbox => "Inbox",
-            Route::Today => "Today",
-            Route::Upcoming => "Upcoming",
-            Route::Projects => "Projects",
+            Route::Home => "Home",
+            Route::Tasks => "Tasks",
             Route::Notes => "Notes",
             Route::Tags => "Tags",
             Route::Habits => "Habits",
@@ -72,10 +79,8 @@ impl Route {
     /// One line under the title in the content pane.
     pub const fn subtitle(self) -> &'static str {
         match self {
-            Route::Inbox => "Captured, not yet filed",
-            Route::Today => "What is due before tomorrow",
-            Route::Upcoming => "Scheduled after today",
-            Route::Projects => "One list per thing you are building",
+            Route::Home => "Today at a glance",
+            Route::Tasks => "One list, grouped by when it is due",
             Route::Notes => "Markdown files in your vault",
             Route::Tags => "Across notes, tasks and habits",
             Route::Habits => "What you are repeating",
@@ -85,10 +90,19 @@ impl Route {
         }
     }
 
-    /// Whether the route has a list to select from, and therefore a detail pane.
-    /// Search and Settings are single-pane screens.
+    pub const fn layout(self) -> Layout {
+        match self {
+            Route::Home => Layout::Dashboard,
+            Route::Tasks | Route::Tags | Route::Habits | Route::Reminders => Layout::List,
+            Route::Notes => Layout::ListDetail,
+            Route::Search | Route::Settings => Layout::Page,
+        }
+    }
+
+    /// Whether the route has a note list to select from, and therefore a detail
+    /// pane. Only Notes does.
     pub const fn has_detail(self) -> bool {
-        !matches!(self, Route::Search | Route::Settings)
+        matches!(self.layout(), Layout::ListDetail)
     }
 
     /// Parse a `--route` value.
@@ -99,10 +113,8 @@ impl Route {
     /// The sidebar glyph.
     pub const fn icon(self) -> &'static rune::Icon {
         match self {
-            Route::Inbox => &crate::icons::INBOX,
-            Route::Today => &crate::icons::TODAY,
-            Route::Upcoming => &crate::icons::UPCOMING,
-            Route::Projects => &crate::icons::PROJECTS,
+            Route::Home => &crate::icons::HOME,
+            Route::Tasks => &crate::icons::TASKS,
             Route::Notes => &crate::icons::NOTES,
             Route::Tags => &crate::icons::TAGS,
             Route::Habits => &crate::icons::HABITS,
@@ -115,10 +127,8 @@ impl Route {
     /// What the empty state says before there is any data.
     pub const fn empty_title(self) -> &'static str {
         match self {
-            Route::Inbox => "Inbox is clear",
-            Route::Today => "Nothing due today",
-            Route::Upcoming => "Nothing scheduled",
-            Route::Projects => "No projects yet",
+            Route::Home => "Nothing here yet",
+            Route::Tasks => "No tasks yet",
             Route::Notes => "No notes yet",
             Route::Tags => "No tags yet",
             Route::Habits => "No habits yet",
@@ -132,14 +142,12 @@ impl Route {
     /// promises a command the shell does not answer yet.
     pub const fn empty_hint(self) -> &'static str {
         match self {
-            Route::Inbox => "Captured tasks wait here until you file them into a project.",
-            Route::Today => "Tasks with a due date appear here on the day they are due.",
-            Route::Upcoming => "Everything scheduled after today appears here.",
-            Route::Projects => "A project groups tasks that share a goal.",
+            Route::Home => "Your day, your tasks and your notes, in one place.",
+            Route::Tasks => "Add a task above. Type #project to file it under a project.",
             Route::Notes => "Each note is a Markdown file, readable by any editor.",
             Route::Tags => "Tags from every note, task and habit are collected here.",
             Route::Habits => "Habits track what you repeat, with a streak for each.",
-            Route::Reminders => "Reminders appear here with the time they fire.",
+            Route::Reminders => "Reminders are not in this build yet.",
             Route::Search => "Search titles and bodies across the vault. Nothing leaves this Mac.",
             Route::Settings => "Choose your vault, theme and notification behaviour.",
         }
@@ -156,11 +164,11 @@ pub struct Section {
 pub const SECTIONS: &[Section] = &[
     Section {
         title: "",
-        routes: &[Route::Inbox, Route::Today, Route::Upcoming],
+        routes: &[Route::Home, Route::Tasks],
     },
     Section {
         title: "Library",
-        routes: &[Route::Projects, Route::Notes, Route::Tags],
+        routes: &[Route::Notes, Route::Tags],
     },
     Section {
         title: "Routines",
@@ -219,5 +227,35 @@ mod tests {
             assert!(!section.routes.is_empty());
         }
         assert_eq!(SECTIONS[0].title, "", "the first group is unlabelled");
+    }
+
+    #[test]
+    fn home_is_the_first_route_and_tasks_follows_it() {
+        assert_eq!(Route::ALL[0], Route::Home);
+        assert_eq!(SECTIONS[0].routes, [Route::Home, Route::Tasks]);
+        assert_eq!(Route::Home.layout(), Layout::Dashboard);
+    }
+
+    #[test]
+    fn only_notes_has_a_detail_pane() {
+        for route in Route::ALL {
+            assert_eq!(
+                route.has_detail(),
+                route == Route::Notes,
+                "{} has the wrong layout",
+                route.key()
+            );
+        }
+    }
+
+    #[test]
+    fn projects_are_not_a_route() {
+        for route in Route::ALL {
+            assert_ne!(
+                route.key(),
+                "projects",
+                "projects are a filter, not a screen"
+            );
+        }
     }
 }

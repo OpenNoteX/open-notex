@@ -350,7 +350,7 @@ fn check(output: &Output, scene: &str, theme: &str) -> Result<(), String> {
 /// frame, which is the failure a PNG alone cannot catch.
 fn assert_tree(path: &Path, scene: &str) -> Result<(), String> {
     let tree = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    for key in ["\"sidebar\"", "\"toolbar\"", "\"nav-today\""] {
+    for key in ["\"sidebar\"", "\"toolbar\"", "\"nav-home\""] {
         if !tree.contains(key) {
             return Err(format!("scene {scene}: {key} is missing from the tree"));
         }

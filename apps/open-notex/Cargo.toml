@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 notex-core.workspace = true
 notex-store.workspace = true
+notex-time.workspace = true
 notex-ui.workspace = true
 rune = { workspace = true, features = ["native-file-dialog"] }
 rune-kit.workspace = true

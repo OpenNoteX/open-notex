@@ -8,6 +8,8 @@ repository.workspace = true
 description = "The openNoteX shell: routes, theme and the three-pane layout, rendered by Rune."
 
 [dependencies]
+notex-core.workspace = true
+notex-time.workspace = true
 rune.workspace = true
 rune-kit.workspace = true
 

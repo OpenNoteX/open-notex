@@ -16,24 +16,14 @@ macro_rules! icon {
 }
 
 icon!(
-    INBOX,
-    "notex-inbox",
-    r#"<path d="M2.5 9.5L4.6 3.6H11.4L13.5 9.5V12.5H2.5Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2.5 9.5H5.8L6.8 11H9.2L10.2 9.5H13.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#
+    HOME,
+    "notex-home",
+    r#"<path d="M2.6 7.2L8 2.6L13.4 7.2V13.2H9.8V9.4H6.2V13.2H2.6Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#
 );
 icon!(
-    TODAY,
-    "notex-today",
-    r#"<circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.8V3.2M8 12.8V14.2M1.8 8H3.2M12.8 8H14.2M3.6 3.6L4.6 4.6M11.4 11.4L12.4 12.4M12.4 3.6L11.4 4.6M4.6 11.4L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#
-);
-icon!(
-    UPCOMING,
-    "notex-upcoming",
-    r#"<rect x="2.5" y="3.5" width="11" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.5H13.5M5.5 2V4M10.5 2V4M5.5 9.5H7M9 9.5H10.5M5.5 11.5H7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#
-);
-icon!(
-    PROJECTS,
-    "notex-projects",
-    r#"<path d="M2.5 5.2C2.5 4.5 3 4 3.7 4H6.3L7.7 5.6H12.3C13 5.6 13.5 6.1 13.5 6.8V11.5C13.5 12.2 13 12.7 12.3 12.7H3.7C3 12.7 2.5 12.2 2.5 11.5Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#
+    TASKS,
+    "notex-tasks",
+    r#"<path d="M3.2 4.6H13M3.2 8H13M3.2 11.4H9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M11.2 10.4L12.4 11.6L14.4 9.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
 );
 icon!(
     NOTES,
@@ -71,14 +61,24 @@ icon!(
     "notex-warning",
     r#"<path d="M8 2.4L14.4 13.4H1.6Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 6.2V9.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/>"#
 );
-// Not routes: the list's new-note button and the detail pane's delete button.
-icon!(
-    PLUS,
-    "notex-plus",
-    r#"<path d="M8 3.4V12.6M3.4 8H12.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#
-);
+// Not routes: the list's buttons and the archive's restore.
 icon!(
     TRASH,
     "notex-trash",
     r#"<path d="M3.2 4.8H12.8M6.3 4.8V3.4H9.7V4.8M4.8 4.8L5.4 12.6H10.6L11.2 4.8M6.8 7.2V10.4M9.2 7.2V10.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
+);
+icon!(
+    ARCHIVE,
+    "notex-archive",
+    r#"<path d="M2.6 3.4H13.4V6H2.6Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M3.6 6V12.6H12.4V6M6.4 8.4H9.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
+);
+icon!(
+    RESTORE,
+    "notex-restore",
+    r#"<path d="M4.2 4.2V7.4H7.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.4 7.2C5.4 4.9 7.4 3.6 9.8 4C11.9 4.4 13.2 6.2 13.2 8.3C13.2 10.5 11.5 12.4 9 12.4C7.3 12.4 6 11.7 5.1 10.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
+);
+icon!(
+    PLUS,
+    "notex-plus",
+    r#"<path d="M8 3.4V12.6M3.4 8H12.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#
 );

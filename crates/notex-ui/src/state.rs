@@ -4,8 +4,10 @@
 //! clock. Everything here is cheap to clone and cheap to compare, because Rune
 //! re-runs the view on every event.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 
+use notex_time::checklist::{self, Bucket};
 use rune::TextEdit;
 use rune_kit::shell::PaneState;
 
@@ -29,6 +31,9 @@ pub enum Load {
     Failed(String),
 }
 
+/// How long the undo toast holds a completed or deleted task.
+pub const UNDO_SECONDS: f64 = 8.0;
+
 /// A row in the notes list. The body is not here: it is read on demand, so a long
 /// vault never sits in memory.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -37,6 +42,9 @@ pub struct NoteRow {
     pub title: String,
     /// Frontmatter tags, without the leading `#`.
     pub tags: Vec<String>,
+    /// The file's modification time, in nanoseconds. Home's "Recent notes" is
+    /// this, not the time the index last looked at the file.
+    pub modified: i64,
 }
 
 impl NoteRow {
@@ -45,13 +53,95 @@ impl NoteRow {
             id: id.into(),
             title: title.into(),
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            modified: 0,
         }
+    }
+
+    /// The file's mtime, for sorting Home's recent notes.
+    pub fn modified(mut self, ns: i64) -> Self {
+        self.modified = ns;
+        self
     }
 
     /// The second line of the row: `work · review`, or the empty string.
     pub fn tag_line(&self) -> String {
         self.tags.join(" · ")
     }
+}
+
+/// One task in the checklist, joined with the project it is filed into.
+///
+/// The shell does not depend on the store: the app maps `notex_store::Task`
+/// into this. `completed_day` is mapped there too, so the view never reads a
+/// timezone or a clock.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskRow {
+    pub id: String,
+    pub title: String,
+    pub notes: String,
+    pub done: bool,
+    pub list_id: Option<String>,
+    pub list_name: Option<String>,
+    pub list_color: Option<String>,
+    /// `YYYY-MM-DD`, or `None` for a task with no date.
+    pub due_day: Option<String>,
+    pub completed_at: Option<i64>,
+    /// The local day `completed_at` falls on, for the archive's groups.
+    pub completed_day: Option<String>,
+}
+
+impl TaskRow {
+    /// The due chip, when the task has a date and this is a real day.
+    pub fn due(&self, today: &str) -> Option<checklist::Due> {
+        self.due_day
+            .as_deref()
+            .map(|day| checklist::due(day, today))
+    }
+}
+
+/// A project, in filter-chip order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+/// The local clock Home draws. The app fills it from `poll`; the view only reads
+/// it, so a frame never asks the system what time it is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Now {
+    /// `YYYY-MM-DD`, the day tasks are grouped against.
+    pub day: String,
+    /// `14:32`.
+    pub time: String,
+    /// `Thursday 19 November`.
+    pub date: String,
+}
+
+/// One task being renamed in place.
+pub struct TaskEdit {
+    pub id: String,
+    pub edit: TextEdit,
+}
+
+/// One task's notes, open under the expanded row.
+pub struct TaskNote {
+    pub id: String,
+    pub edit: TextEdit,
+    /// The last text sent; the row shows "Saved" until it changes again.
+    pub saving: bool,
+}
+
+/// The eight-second way back from a completion or a delete.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Undo {
+    pub id: String,
+    /// `true` reopens the task, `false` restores the deleted row.
+    pub done: bool,
+    pub message: String,
+    /// Seconds left. `tick` counts this down and drops the toast at zero.
+    pub left: f64,
 }
 
 /// What the detail pane holds for the selected note.
@@ -163,6 +253,37 @@ pub enum Action {
     CheckForUpdates,
     /// Open a release page in the browser, by version.
     ShowRelease(String),
+    /// Add a task, creating its project when the name is new.
+    CreateTask {
+        title: String,
+        project: Option<String>,
+        due_day: Option<String>,
+    },
+    SetTaskTitle {
+        id: String,
+        title: String,
+    },
+    SetTaskNotes {
+        id: String,
+        notes: String,
+    },
+    /// Set or clear the all-day due date. `None` clears it.
+    SetTaskDue {
+        id: String,
+        due_day: Option<String>,
+    },
+    SetTaskProject {
+        id: String,
+        list_id: Option<String>,
+    },
+    SetTaskDone {
+        id: String,
+        done: bool,
+    },
+    /// Soft delete; the undo toast puts the same row back.
+    DeleteTask(String),
+    RestoreTask(String),
+    CreateProject(String),
 }
 
 /// Where the update check stands. Settings shows it, and only a release newer
@@ -297,6 +418,32 @@ pub struct State {
     pub load: Load,
     /// The notes list, alphabetical, from the index.
     pub notes: Vec<NoteRow>,
+    /// The local clock Home draws, filled by `poll`.
+    pub now: Now,
+    /// The checklist, in store order (open first, then by day).
+    pub tasks: Vec<TaskRow>,
+    /// Every project, in chip order.
+    pub projects: Vec<ProjectRow>,
+    /// `Some(project id)` narrows the checklist; `None` is "All".
+    pub project_filter: Option<String>,
+    /// The add row's text. Kept in `State`, so the view does not own a field.
+    pub add_task: TextEdit,
+    /// The `+ Project` field, open while it is `Some`.
+    pub add_project: Option<TextEdit>,
+    /// The one task being renamed in place.
+    pub task_edit: Option<TaskEdit>,
+    /// The expanded row's notes field.
+    pub task_note: Option<TaskNote>,
+    /// The row whose notes and dates are open under it.
+    pub expanded: Option<String>,
+    /// The archive is showing done tasks instead of the checklist.
+    pub archive: bool,
+    /// The last completion or delete, while its toast is up.
+    pub undo: Option<Undo>,
+    /// Why the last task write failed, in a sentence.
+    pub task_error: Option<String>,
+    /// Task commands waiting for `take_action`. Handlers push; the view never sends.
+    pending: VecDeque<Action>,
     /// The selected note's id; `None` when the list has no selection.
     pub selected: Option<String>,
     /// The selected note's body, or why it is not here yet.
@@ -348,11 +495,24 @@ impl State {
     pub fn with_vault(vault: impl Into<String>) -> Self {
         let vault = vault.into();
         Self {
-            route: Route::Today,
+            route: Route::Home,
             sidebar: PaneState::new(216.0).range(180.0, 320.0),
             detail: PaneState::new(440.0).range(320.0, 720.0),
             load: Load::Ready,
             notes: Vec::new(),
+            now: Now::default(),
+            tasks: Vec::new(),
+            projects: Vec::new(),
+            project_filter: None,
+            add_task: TextEdit::new(""),
+            add_project: None,
+            task_edit: None,
+            task_note: None,
+            expanded: None,
+            archive: false,
+            undo: None,
+            task_error: None,
+            pending: VecDeque::new(),
             selected: None,
             body: NoteBody::None,
             draft: None,
@@ -396,6 +556,366 @@ impl State {
             self.pending_open = None;
         }
         self.notes = notes;
+    }
+
+    // ---------------------------------------------------------------- tasks
+
+    /// The clock Home draws. Called by `poll`; repeated calls with the same
+    /// strings are cheap and change nothing.
+    pub fn set_clock(&mut self, now: Now) -> bool {
+        if self.now == now {
+            return false;
+        }
+        self.now = now;
+        true
+    }
+
+    /// Replace the checklist. Editors for rows that are gone are dropped, so a
+    /// delete from another window cannot leave an input bound to nothing.
+    pub fn set_tasks(&mut self, tasks: Vec<TaskRow>) {
+        self.tasks = tasks;
+        self.prune_task_editors();
+    }
+
+    pub fn set_projects(&mut self, projects: Vec<ProjectRow>) {
+        if let Some(id) = &self.project_filter
+            && !projects.iter().any(|project| &project.id == id)
+        {
+            self.project_filter = None;
+        }
+        self.projects = projects;
+    }
+
+    /// A task after a write. The row is replaced in place, so the list does not
+    /// jump while it is being read.
+    pub fn task_changed(&mut self, task: TaskRow) {
+        match self.tasks.iter_mut().find(|row| row.id == task.id) {
+            Some(row) => *row = task,
+            None => self.tasks.push(task),
+        }
+        self.sort_tasks();
+        // The notes field says "Saving…" until the write that carried its text
+        // comes back; the same text means this is that answer.
+        if let Some(note) = &mut self.task_note
+            && let Some(row) = self.tasks.iter().find(|row| row.id == note.id)
+            && row.notes == note.edit.text
+        {
+            note.saving = false;
+        }
+    }
+
+    /// The row is gone (deleted here or elsewhere).
+    pub fn task_gone(&mut self, id: &str) {
+        self.tasks.retain(|task| task.id != id);
+        if self.task_edit.as_ref().is_some_and(|edit| edit.id == id) {
+            self.task_edit = None;
+        }
+        if self.expanded.as_deref() == Some(id) {
+            self.expanded = None;
+            self.task_note = None;
+        }
+    }
+
+    pub fn list_changed(&mut self, project: ProjectRow) {
+        match self.projects.iter_mut().find(|row| row.id == project.id) {
+            Some(row) => *row = project,
+            None => self.projects.push(project),
+        }
+        self.projects.sort_by_key(|row| row.name.to_lowercase());
+    }
+
+    pub fn task_failed(&mut self, error: impl Into<String>) {
+        self.task_error = Some(error.into());
+    }
+
+    /// Open tasks, in store order.
+    pub fn open_tasks(&self) -> impl Iterator<Item = &TaskRow> {
+        self.tasks.iter().filter(|task| !task.done)
+    }
+
+    pub fn open_task_count(&self) -> usize {
+        self.open_tasks().count()
+    }
+
+    pub fn done_task_count(&self) -> usize {
+        self.tasks.iter().filter(|task| task.done).count()
+    }
+
+    /// The checklist after the project chip: open tasks only.
+    pub fn visible_tasks(&self) -> impl Iterator<Item = &TaskRow> {
+        let filter = self.project_filter.as_deref();
+        self.open_tasks()
+            .filter(move |task| filter.is_none_or(|id| task.list_id.as_deref() == Some(id)))
+    }
+
+    /// Which group a task belongs to today.
+    pub fn bucket_of(&self, task: &TaskRow) -> Bucket {
+        checklist::bucket(task.due_day.as_deref(), &self.now.day)
+    }
+
+    /// Open tasks in one group of the checklist.
+    pub fn tasks_in(&self, bucket: Bucket) -> Vec<&TaskRow> {
+        self.visible_tasks()
+            .filter(|task| self.bucket_of(task) == bucket)
+            .collect()
+    }
+
+    /// Done tasks, newest first, for the archive.
+    pub fn archived(&self) -> Vec<&TaskRow> {
+        let mut done: Vec<&TaskRow> = self.tasks.iter().filter(|task| task.done).collect();
+        done.sort_by(|a, b| {
+            b.completed_at
+                .cmp(&a.completed_at)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        done
+    }
+
+    /// The most recently written notes, newest first. Empty when the index has
+    /// no notes or no mtimes (a test that did not set them).
+    pub fn recent_notes(&self, limit: usize) -> Vec<&NoteRow> {
+        let mut notes: Vec<&NoteRow> = self.notes.iter().collect();
+        notes.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        notes.truncate(limit);
+        notes
+    }
+
+    /// Return in the add row. The line is parsed, the field is cleared and the
+    /// command is queued. An empty line does nothing.
+    pub fn add_task_now(&mut self) {
+        let Some(input) = notex_core::parse_task_input(&self.add_task.text) else {
+            return;
+        };
+        let project = input.project.or_else(|| {
+            // A filtered checklist adds into the project it is showing.
+            self.project_filter.as_ref().and_then(|id| {
+                self.projects
+                    .iter()
+                    .find(|project| &project.id == id)
+                    .map(|project| project.name.clone())
+            })
+        });
+        self.add_task.replace_text("");
+        self.task_error = None;
+        self.pending.push_back(Action::CreateTask {
+            title: input.title,
+            project,
+            due_day: None,
+        });
+    }
+
+    /// The `+ Project` chip: open its one-line field.
+    pub fn begin_project(&mut self) {
+        self.add_project.get_or_insert_with(|| TextEdit::new(""));
+    }
+
+    pub fn cancel_project(&mut self) {
+        self.add_project = None;
+    }
+
+    /// Return in the `+ Project` field.
+    pub fn commit_project(&mut self) {
+        let Some(edit) = &self.add_project else {
+            return;
+        };
+        let name = edit.text.trim().to_owned();
+        if name.is_empty() {
+            self.add_project = None;
+            return;
+        }
+        self.pending.push_back(Action::CreateProject(name));
+        // The chips answer with `ListChanged`; the field closes now, not later,
+        // so the next Return in the add row is a task.
+        self.add_project = None;
+    }
+
+    pub fn set_project_filter(&mut self, id: Option<String>) {
+        self.project_filter = id;
+    }
+
+    /// Click the title: rename it in place, with the caret where it belongs.
+    pub fn begin_edit(&mut self, id: &str) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
+            return;
+        };
+        let mut edit = TextEdit::new(task.title.clone());
+        edit.focused = true;
+        self.task_edit = Some(TaskEdit {
+            id: id.to_owned(),
+            edit,
+        });
+    }
+
+    /// Return in the rename field. An empty title, or the same title, is not a
+    /// write: the row stays as it was.
+    pub fn commit_edit(&mut self) {
+        let Some(edit) = self.task_edit.take() else {
+            return;
+        };
+        let title = edit.edit.text.trim().to_owned();
+        let Some(task) = self.tasks.iter().find(|task| task.id == edit.id) else {
+            return;
+        };
+        if title.is_empty() || title == task.title {
+            return;
+        }
+        self.task_error = None;
+        self.pending
+            .push_back(Action::SetTaskTitle { id: edit.id, title });
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.task_edit = None;
+    }
+
+    /// Open a row's notes and dates, or close them.
+    pub fn toggle_expanded(&mut self, id: &str) {
+        if self.expanded.as_deref() == Some(id) {
+            self.expanded = None;
+            self.task_note = None;
+            return;
+        }
+        self.expanded = Some(id.to_owned());
+        self.task_note = self
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .map(|task| TaskNote {
+                id: task.id.clone(),
+                edit: TextEdit::new(task.notes.clone()),
+                saving: false,
+            });
+    }
+
+    /// `Save note` under an expanded row.
+    pub fn save_task_note(&mut self) {
+        let Some(note) = &mut self.task_note else {
+            return;
+        };
+        note.saving = true;
+        self.pending.push_back(Action::SetTaskNotes {
+            id: note.id.clone(),
+            notes: note.edit.text.clone(),
+        });
+    }
+
+    /// Check a task. Completing shows the eight-second way back; reopening is
+    /// immediate.
+    pub fn toggle_task(&mut self, id: &str) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
+            return;
+        };
+        self.task_error = None;
+        if task.done {
+            self.pending.push_back(Action::SetTaskDone {
+                id: id.to_owned(),
+                done: false,
+            });
+            return;
+        }
+        self.undo = Some(Undo {
+            id: id.to_owned(),
+            done: true,
+            message: format!("\u{201c}{}\u{201d} done", task.title),
+            left: UNDO_SECONDS,
+        });
+        self.pending.push_back(Action::SetTaskDone {
+            id: id.to_owned(),
+            done: true,
+        });
+    }
+
+    /// Delete a task. There is no dialog: the row is soft-deleted, and the toast
+    /// puts the same row back.
+    pub fn delete_task(&mut self, id: &str) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
+            return;
+        };
+        self.task_error = None;
+        self.undo = Some(Undo {
+            id: id.to_owned(),
+            done: false,
+            message: format!("\u{201c}{}\u{201d} deleted", task.title),
+            left: UNDO_SECONDS,
+        });
+        self.pending.push_back(Action::DeleteTask(id.to_owned()));
+    }
+
+    /// The toast's Undo button.
+    pub fn undo_task(&mut self) {
+        let Some(undo) = self.undo.take() else {
+            return;
+        };
+        if undo.done {
+            self.pending.push_back(Action::SetTaskDone {
+                id: undo.id,
+                done: false,
+            });
+        } else {
+            self.pending.push_back(Action::RestoreTask(undo.id));
+        }
+    }
+
+    pub fn dismiss_undo(&mut self) {
+        self.undo = None;
+    }
+
+    /// The due buttons under an expanded row. `Some(day)` sets, `None` clears.
+    pub fn set_due(&mut self, id: &str, due_day: Option<String>) {
+        self.task_error = None;
+        self.pending.push_back(Action::SetTaskDue {
+            id: id.to_owned(),
+            due_day,
+        });
+    }
+
+    /// Move a task to a project, or to no project.
+    pub fn set_project(&mut self, id: &str, list_id: Option<String>) {
+        self.task_error = None;
+        self.pending.push_back(Action::SetTaskProject {
+            id: id.to_owned(),
+            list_id,
+        });
+    }
+
+    /// Open a task from Home: the checklist, with that row's notes open.
+    pub fn show_task(&mut self, id: &str) {
+        self.route = Route::Tasks;
+        self.archive = false;
+        if self.expanded.as_deref() != Some(id) {
+            self.toggle_expanded(id);
+        }
+    }
+
+    /// Drop editors whose row the list no longer has.
+    fn prune_task_editors(&mut self) {
+        if let Some(edit) = &self.task_edit
+            && !self.tasks.iter().any(|task| task.id == edit.id)
+        {
+            self.task_edit = None;
+        }
+        if let Some(id) = &self.expanded
+            && !self.tasks.iter().any(|task| task.id == *id)
+        {
+            self.expanded = None;
+            self.task_note = None;
+        }
+    }
+
+    fn sort_tasks(&mut self) {
+        self.tasks.sort_by(|a, b| {
+            a.done.cmp(&b.done).then_with(|| {
+                a.due_day
+                    .is_none()
+                    .cmp(&b.due_day.is_none())
+                    .then_with(|| a.due_day.cmp(&b.due_day))
+                    .then_with(|| a.title.cmp(&b.title))
+            })
+        });
     }
 
     /// Select a note. If the editor has unsaved text, the switch waits for the
@@ -795,25 +1315,49 @@ impl State {
             draft.idle += dt;
             draft.since_save += dt;
         }
-        self.next_wake().is_some_and(|wait| wait <= 0.0)
+        // The undo toast is the only thing on the task side that waits.
+        let mut expired = false;
+        if let Some(undo) = &mut self.undo {
+            undo.left -= dt;
+            expired = undo.left <= 0.0;
+        }
+        if expired {
+            self.undo = None;
+        }
+        expired || self.next_wake().is_some_and(|wait| wait <= 0.0)
     }
 
-    /// How long `poll` should sleep before asking for a save, if the draft is
-    /// dirty and nothing is blocking it.
+    /// How long `poll` should sleep before asking for a save or dropping an
+    /// expired undo, if either is waiting.
     pub fn next_wake(&self) -> Option<f64> {
-        let draft = self.draft.as_ref()?;
-        if !draft.is_dirty() || draft.saving || draft.conflict.is_some() || draft.error.is_some() {
-            return None;
+        let draft = self.draft.as_ref().and_then(|draft| {
+            if !draft.is_dirty()
+                || draft.saving
+                || draft.conflict.is_some()
+                || draft.error.is_some()
+            {
+                return None;
+            }
+            Some(
+                (AUTOSAVE_IDLE - draft.idle)
+                    .min(AUTOSAVE_MAX - draft.since_save)
+                    .max(0.0),
+            )
+        });
+        let undo = self.undo.as_ref().map(|undo| undo.left.max(0.0));
+        match (draft, undo) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
         }
-        Some(
-            (AUTOSAVE_IDLE - draft.idle)
-                .min(AUTOSAVE_MAX - draft.since_save)
-                .max(0.0),
-        )
     }
 
     /// The next command the app should send. Called from `poll` after `tick`.
     pub fn take_action(&mut self) -> Option<Action> {
+        // A click on a task is one-shot and must not wait behind anything.
+        if let Some(action) = self.pending.pop_front() {
+            return Some(action);
+        }
         // The update requests come before the editor: they are one-shot, and a
         // check must not wait behind a draft that is waiting out its idle delay.
         if let Some(version) = std::mem::take(&mut self.release_requested) {

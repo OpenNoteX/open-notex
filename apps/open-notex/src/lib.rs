@@ -15,7 +15,7 @@ pub mod vault;
 use notex_core::Availability;
 use notex_store::worker::{self, Cmd, Evt, Notify, StoreHandle, Worker};
 use notex_store::{StoreError, db};
-use notex_ui::{Action, Load, NoteRow, State, VaultIntent};
+use notex_ui::{Action, Load, NoteRow, Now, ProjectRow, State, TaskRow, VaultIntent};
 use rune::{Tx, Waker};
 use thiserror::Error;
 
@@ -103,12 +103,21 @@ pub fn start(
     let reindex = || Cmd::Reindex {
         root: vault.to_path_buf(),
     };
+    // Tasks are structured data: they come from SQLite, not the vault scan, so
+    // one read at launch is enough and the reindex does not touch them.
+    let tasks = || {
+        let handle = session.handle();
+        handle
+            .send(Cmd::ListTasks)
+            .and_then(|()| handle.send(Cmd::ListLists))
+    };
     let started = if session.is_fresh() {
-        session.handle().send(reindex())
+        session.handle().send(reindex()).and_then(|()| tasks())
     } else {
         session
             .handle()
             .send(Cmd::ListNotes)
+            .and_then(|()| tasks())
             .and_then(|()| session.handle().send(reindex()))
     };
 
@@ -244,7 +253,14 @@ fn drive_vault(state: &mut State) -> bool {
 /// autosave, and drains the worker. Returns whether the view changed, so an idle
 /// app draws nothing.
 pub fn poll(state: &mut State, now: f64, tx: &mut Tx) -> bool {
-    let mut changed = state.tick(now);
+    // A headless run is a fixed scene: its clock is part of it, so the wall
+    // clock must not replace it and make a snapshot depend on the hour.
+    let mut changed = if rune::is_headless() {
+        false
+    } else {
+        refresh_clock(state)
+    };
+    changed |= state.tick(now);
     // The dialog is answered here, before the worker drains, so a folder chosen
     // this frame has its first reply pumped in the same frame.
     if state.vault_pending() {
@@ -334,6 +350,62 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
             Action::ShowRelease(version) => {
                 update::open_page(&update::release_page(&version));
             }
+            Action::CreateTask {
+                title,
+                project,
+                due_day,
+            } => {
+                if handle
+                    .send(Cmd::CreateTask {
+                        title,
+                        project,
+                        due_day,
+                    })
+                    .is_err()
+                {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::SetTaskTitle { id, title } => {
+                if handle.send(Cmd::SetTaskTitle { id, title }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::SetTaskNotes { id, notes } => {
+                if handle.send(Cmd::SetTaskNotes { id, notes }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::SetTaskDue { id, due_day } => {
+                if handle.send(Cmd::SetTaskDue { id, due_day }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::SetTaskProject { id, list_id } => {
+                if handle.send(Cmd::SetTaskList { id, list_id }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::SetTaskDone { id, done } => {
+                if handle.send(Cmd::SetTaskDone { id, done }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::DeleteTask(id) => {
+                if handle.send(Cmd::DeleteTask { id }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::RestoreTask(id) => {
+                if handle.send(Cmd::RestoreTask { id }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::CreateProject(name) => {
+                if handle.send(Cmd::CreateList { name }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
             Action::Save(request) => {
                 let id = request.id.clone();
                 let sent = handle.send(Cmd::SaveNote {
@@ -382,6 +454,7 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
                         id: note.id,
                         title: note.title,
                         tags: note.tags,
+                        modified: note.mtime_ns,
                     })
                     .collect(),
             );
@@ -433,11 +506,98 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
             state.save_failed(&id, err);
             true
         }
+        Evt::Tasks(tasks) => {
+            state.set_tasks(tasks.into_iter().map(task_row).collect());
+            true
+        }
+        Evt::Lists(lists) => {
+            state.set_projects(lists.into_iter().map(project_row).collect());
+            true
+        }
+        Evt::TaskChanged(task) => {
+            state.task_changed(task_row(task));
+            true
+        }
+        Evt::TaskGone { id } => {
+            state.task_gone(&id);
+            true
+        }
+        Evt::ListChanged(list) => {
+            state.list_changed(project_row(list));
+            true
+        }
+        Evt::TaskFailed { err } => {
+            state.task_failed(err);
+            true
+        }
         Evt::Failed { op, err } => {
             state.load = Load::Failed(format!("{op}: {err}"));
             true
         }
     }
+}
+
+/// Map the store's row into the shell's. `completed_day` is resolved here, in
+/// the layer that owns a clock and a timezone.
+fn task_row(task: notex_store::Task) -> TaskRow {
+    TaskRow {
+        completed_day: task.completed_at.and_then(notex_time::local_day),
+        id: task.id,
+        title: task.title,
+        notes: task.notes,
+        done: task.done,
+        list_id: task.list_id,
+        list_name: task.list_name,
+        list_color: task.list_color,
+        due_day: task.due_day,
+        completed_at: task.completed_at,
+    }
+}
+
+fn project_row(list: notex_store::List) -> ProjectRow {
+    ProjectRow {
+        id: list.id,
+        name: list.name,
+        color: list.color,
+    }
+}
+
+thread_local! {
+    /// The minute the Home clock was last built for, so `poll` formats three
+    /// strings once a minute rather than once a frame.
+    static CLOCK_MINUTE: std::cell::Cell<i64> = const { std::cell::Cell::new(i64::MIN) };
+}
+
+/// Fill Home's clock. The view never asks the system what time it is.
+fn refresh_clock(state: &mut State) -> bool {
+    let minute = now_ms() / 60_000;
+    let due = CLOCK_MINUTE.with(|cell| {
+        if cell.get() == minute {
+            false
+        } else {
+            cell.set(minute);
+            true
+        }
+    });
+    if !due {
+        return false;
+    }
+    match notex_time::local_stamp(minute * 60_000) {
+        Ok(stamp) => state.set_clock(Now {
+            day: stamp.day,
+            time: stamp.time,
+            date: stamp.date,
+        }),
+        Err(_) => false,
+    }
+}
+
+/// The wall clock, in UTC epoch milliseconds.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 /// How long a close or a quit waits for a draft to reach the file.

@@ -110,7 +110,9 @@ fn an_empty_route_explains_itself_in_the_detail_pane() {
 #[test]
 fn the_sidebar_lists_every_route_and_the_others_have_no_detail_pane() {
     let mut rt = runtime(vault_state());
-    assert!(rt.find("detail").is_some(), "Today has a detail pane");
+    assert!(rt.find("detail").is_none(), "Home is one column");
+    click(&mut rt, "nav-notes");
+    assert!(rt.find("detail").is_some(), "Notes has a detail pane");
 
     click(&mut rt, "nav-settings");
     assert!(rt.find("settings").is_some(), "Settings renders");
@@ -227,16 +229,16 @@ fn every_answer_from_the_check_reads_as_a_sentence() {
 fn the_arrows_walk_the_sidebar_and_the_selection_follows() {
     let mut rt = runtime(vault_state());
     press(&mut rt, Key::Tab); // the list is one tab stop: it lands on the selected row
-    assert_eq!(rt.state.route, Route::Today);
+    assert_eq!(rt.state.route, Route::Home);
 
     press(&mut rt, Key::Down);
-    assert_eq!(rt.state.route, Route::Upcoming);
+    assert_eq!(rt.state.route, Route::Tasks);
 
     press(&mut rt, Key::Down);
-    assert_eq!(rt.state.route, Route::Projects, "across a section boundary");
+    assert_eq!(rt.state.route, Route::Notes, "across a section boundary");
 
     press(&mut rt, Key::Up);
-    assert_eq!(rt.state.route, Route::Upcoming);
+    assert_eq!(rt.state.route, Route::Tasks);
 }
 
 #[test]
@@ -442,7 +444,7 @@ fn the_new_note_button_and_command_n_ask_for_a_note() {
 
     // A route without a note list has nothing to add a note to.
     let mut state = notes_state();
-    state.route = Route::Today;
+    state.route = Route::Tasks;
     let rt = runtime(state);
     assert!(rt.find("new-note").is_none());
 }
@@ -885,4 +887,470 @@ fn not_now_drops_a_folder_that_was_mid_open() {
         !rt.state.vault_pending(),
         "nothing opens after Not now, not even a queued folder"
     );
+}
+
+// ---------------------------------------------------------------- Home / Tasks
+
+fn tasks_state() -> State {
+    use notex_ui::{Now, ProjectRow, TaskRow};
+
+    let task = |id: &str,
+                title: &str,
+                due_day: Option<&str>,
+                project: Option<(&str, &str)>,
+                done: bool,
+                completed_day: Option<&str>| {
+        let (list_id, list_name) = match project {
+            Some((id, name)) => (Some(id.to_owned()), Some(name.to_owned())),
+            None => (None, None),
+        };
+        TaskRow {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            notes: String::new(),
+            done,
+            list_id,
+            list_name,
+            list_color: Some("#3f8f6b".to_owned()),
+            due_day: due_day.map(str::to_owned),
+            completed_at: completed_day.map(|_| 1_763_500_800_000),
+            completed_day: completed_day.map(str::to_owned),
+        }
+    };
+
+    let mut state = vault_state();
+    state.set_clock(Now {
+        day: "2026-11-19".to_owned(),
+        time: "09:41".to_owned(),
+        date: "Thursday 19 November".to_owned(),
+    });
+    state.set_projects(vec![ProjectRow {
+        id: "01L1".to_owned(),
+        name: "Launch".to_owned(),
+        color: Some("#3f8f6b".to_owned()),
+    }]);
+    state.set_notes(vec![
+        NoteRow::new("01A", "Apple", &[]).modified(2),
+        NoteRow::new("01B", "Banana", &[]).modified(1),
+    ]);
+    state.set_tasks(vec![
+        task(
+            "01T1",
+            "Send invites",
+            Some("2026-11-17"),
+            Some(("01L1", "Launch")),
+            false,
+            None,
+        ),
+        task(
+            "01T2",
+            "Outline the launch note",
+            Some("2026-11-19"),
+            None,
+            false,
+            None,
+        ),
+        task(
+            "01T3",
+            "Book the room",
+            Some("2026-11-22"),
+            None,
+            false,
+            None,
+        ),
+        task("01T4", "Read the Rune notes", None, None, false, None),
+        task(
+            "01T5",
+            "Set up the vault",
+            None,
+            None,
+            true,
+            Some("2026-11-18"),
+        ),
+    ]);
+    state
+}
+
+#[test]
+fn home_is_the_first_screen_and_draws_the_day_in_three_blocks() {
+    let rt = runtime(tasks_state());
+
+    assert_eq!(rt.state.route, Route::Home);
+    assert_eq!(label_of(&rt, "home-time"), "09:41");
+    assert_eq!(label_of(&rt, "home-date"), "Thursday 19 November");
+    assert!(
+        label_of(&rt, "home-summary").contains("4 open"),
+        "{}",
+        label_of(&rt, "home-summary")
+    );
+
+    // One block holds Todo, Reminders and Next up, in that order.
+    assert!(rt.find("home-focus").is_some());
+    assert!(rt.find("home-todo").is_some());
+    assert!(rt.find("home-reminders-head").is_some());
+    assert!(rt.find("home-next-head").is_some());
+    assert!(rt.find("home-recent").is_some());
+
+    // Overdue and today are in the todo block, upcoming in Next up.
+    assert!(
+        rt.find("home-task-01T1").is_some(),
+        "the overdue task is on Home"
+    );
+    assert!(
+        rt.find("home-task-01T2").is_some(),
+        "today's task is on Home"
+    );
+    assert!(rt.find("home-task-01T3").is_some(), "next up is on Home");
+}
+
+#[test]
+fn home_lists_recent_notes_newest_first() {
+    let rt = runtime(tasks_state());
+    let order: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|e| e.key)
+        .filter(|key| key.starts_with("home-note-"))
+        .collect();
+    assert_eq!(order, ["home-note-01A", "home-note-01B"]);
+}
+
+#[test]
+fn the_sidebar_counts_open_tasks_and_has_no_projects_row() {
+    let rt = runtime(tasks_state());
+    assert_eq!(label_of(&rt, "nav-home"), "Home");
+    assert_eq!(label_of(&rt, "nav-tasks"), "Tasks (4)");
+
+    let keys: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|e| e.key)
+        .filter(|key| key.starts_with("nav-"))
+        .collect();
+    for gone in ["nav-inbox", "nav-today", "nav-upcoming", "nav-projects"] {
+        assert!(
+            !keys.iter().any(|key| key == gone),
+            "{gone} is still in the sidebar"
+        );
+    }
+}
+
+#[test]
+fn the_checklist_groups_by_when_a_task_is_due() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+
+    assert!(rt.find("task-group-overdue").is_some());
+    assert!(rt.find("task-group-today").is_some());
+    assert!(rt.find("task-group-upcoming").is_some());
+    assert!(rt.find("task-group-someday").is_some());
+    assert_eq!(label_of(&rt, "task-group-overdue-count"), "1");
+    assert!(
+        rt.find("task-row-01T5").is_none(),
+        "a done task is not in the checklist"
+    );
+    // The due chip reads as a person would say it.
+    assert_eq!(label_of(&rt, "task-due-01T1"), "Due 2d late");
+    assert_eq!(label_of(&rt, "task-due-01T3"), "Due Sun");
+}
+
+#[test]
+fn typing_a_line_and_pressing_return_asks_for_a_task_and_keeps_the_field() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-add-input");
+    rt.paste("Send invites #Launch");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateTask {
+            title: "Send invites".to_owned(),
+            project: Some("Launch".to_owned()),
+            due_day: None,
+        })
+    );
+    assert_eq!(
+        rt.state.add_task.text, "",
+        "the field is cleared, not closed"
+    );
+    assert!(
+        rt.find("task-add-input").is_some(),
+        "Return leaves the caret in the add row"
+    );
+}
+
+#[test]
+fn an_empty_add_row_asks_for_nothing() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    click(&mut rt, "task-add-input");
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.take_action(), None);
+}
+
+#[test]
+fn a_project_chip_narrows_the_list_and_adds_into_that_project() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    click(&mut rt, "task-filter-01L1");
+
+    assert_eq!(rt.state.project_filter.as_deref(), Some("01L1"));
+    assert!(rt.find("task-row-01T1").is_some());
+    assert!(
+        rt.find("task-row-01T2").is_none(),
+        "another project is filtered out"
+    );
+    assert!(
+        rt.find("task-group-today").is_none(),
+        "empty groups disappear"
+    );
+
+    // A new line in a filtered list lands in the project it is showing.
+    settle(&mut rt);
+    click(&mut rt, "task-add-input");
+    rt.paste("Book the venue");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateTask {
+            title: "Book the venue".to_owned(),
+            project: Some("Launch".to_owned()),
+            due_day: None,
+        })
+    );
+}
+
+#[test]
+fn a_new_project_is_a_chip_field_and_an_action() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-filter-new");
+    assert!(rt.find("task-project-input").is_some(), "the field opens");
+    click(&mut rt, "task-project-input");
+    rt.paste("Studio");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateProject("Studio".to_owned()))
+    );
+    assert!(rt.find("task-project-input").is_none(), "the field closes");
+}
+
+#[test]
+fn clicking_a_title_renames_it_in_place() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-title-01T2");
+    assert!(
+        rt.find("task-edit-01T2").is_some(),
+        "the row became a field"
+    );
+
+    press(&mut rt, Key::Escape);
+    assert!(
+        rt.find("task-edit-01T2").is_none(),
+        "Escape puts the title back"
+    );
+    assert_eq!(rt.state.take_action(), None);
+
+    click(&mut rt, "task-title-01T2");
+    let edit = rt.state.task_edit.as_mut().unwrap();
+    edit.edit.replace_text("Outline the note");
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskTitle {
+            id: "01T2".to_owned(),
+            title: "Outline the note".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn checking_a_task_offers_eight_seconds_to_undo_it() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-check-01T2");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T2".to_owned(),
+            done: true,
+        })
+    );
+    assert!(rt.find("task-undo").is_some(), "the toast is up");
+
+    rt.state.undo_task();
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T2".to_owned(),
+            done: false,
+        })
+    );
+    assert!(rt.state.undo.is_none(), "the toast closes when it is used");
+}
+
+#[test]
+fn the_undo_toast_expires_after_eight_seconds() {
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    state.toggle_task("01T2");
+    assert!(state.undo.is_some());
+
+    // The app ticks once a second, so eight seconds is eight seconds.
+    let mut clock = 0.0;
+    for _ in 0..7 {
+        clock += 1.0;
+        state.tick(clock);
+    }
+    assert!(state.undo.is_some(), "seven seconds is still time to undo");
+    state.tick(clock + 1.0);
+    assert!(state.undo.is_none(), "the toast is gone at eight");
+}
+
+#[test]
+fn deleting_a_task_is_one_press_and_a_restore() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-expand-01T2");
+
+    click(&mut rt, "task-delete-01T2");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::DeleteTask("01T2".to_owned()))
+    );
+    rt.state.undo_task();
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::RestoreTask("01T2".to_owned()))
+    );
+}
+
+#[test]
+fn the_expanded_row_sets_a_due_day_and_a_project() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-expand-01T4");
+
+    click(&mut rt, "task-due-1-01T4");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDue {
+            id: "01T4".to_owned(),
+            due_day: Some("2026-11-20".to_owned()),
+        })
+    );
+
+    click(&mut rt, "task-project-01L1-01T4");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskProject {
+            id: "01T4".to_owned(),
+            list_id: Some("01L1".to_owned()),
+        })
+    );
+}
+
+#[test]
+fn the_archive_groups_done_tasks_by_the_day_they_were_done() {
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    state.archive = true;
+    let rt = runtime(state);
+
+    assert!(rt.find("archive-list").is_some());
+    assert!(rt.find("archive-row-01T5").is_some());
+    assert!(
+        rt.find("archive-day-2026-11-18").is_some(),
+        "the day heading is there"
+    );
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(texts.iter().any(|t| t == "Yesterday"), "{texts:?}");
+    assert!(
+        rt.find("task-add-input").is_none(),
+        "the archive is not an add screen"
+    );
+}
+
+#[test]
+fn reopening_from_the_archive_asks_to_undo_the_completion() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    click(&mut rt, "tasks-archive");
+    settle(&mut rt);
+
+    click(&mut rt, "archive-restore-01T5");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T5".to_owned(),
+            done: false,
+        })
+    );
+}
+
+#[test]
+fn a_task_changed_replaces_the_row_without_reordering_the_list() {
+    use notex_ui::TaskRow;
+
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    let order =
+        |state: &State| -> Vec<String> { state.tasks.iter().map(|task| task.id.clone()).collect() };
+    let before = order(&state);
+
+    let mut changed: TaskRow = state.tasks.iter().find(|t| t.id == "01T2").unwrap().clone();
+    changed.title = "Outline the note".to_owned();
+    state.task_changed(changed);
+    assert_eq!(order(&state), before, "a rename does not move the row");
+    assert_eq!(
+        state.tasks.iter().find(|t| t.id == "01T2").unwrap().title,
+        "Outline the note"
+    );
+
+    state.task_gone("01T2");
+    assert!(state.tasks.iter().all(|task| task.id != "01T2"));
+}
+
+#[test]
+fn a_task_failure_is_a_sentence_above_the_list() {
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    state.task_failed("the store is no longer running");
+    let rt = runtime(state);
+    assert_eq!(
+        label_of(&rt, "task-error-text"),
+        "the store is no longer running"
+    );
+}
+
+#[test]
+fn every_task_scene_renders_its_screen() {
+    for (name, scene) in notex_ui::SCENES {
+        let mut state = vault_state();
+        scene(&mut state);
+        let rt = runtime(state);
+        match *name {
+            "home" => assert!(rt.find("home-clock").is_some(), "home"),
+            "tasks" => assert!(rt.find("task-list").is_some(), "tasks"),
+            "archive" => assert!(rt.find("archive-list").is_some(), "archive"),
+            _ => {}
+        }
+    }
 }
