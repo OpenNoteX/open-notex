@@ -92,6 +92,9 @@ assert!(rt.state.tasks[0].done);
   Undo reopens the task, the eight-second expiry is counted on the virtual
   clock, deleting is one press and a restore, the expanded row sets a due day
   and a project, and the archive groups done tasks by the day they were done.
+  A project chip's `⋯` opens Rename… and Delete project; a rename is a field on
+  the chip (a refused name stays open with the reason), and a delete releases
+  its tasks to No project, drops the filter to All and offers the same undo.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -123,7 +126,9 @@ assert!(rt.state.tasks[0].done);
   follows it; completing moves the task to the archive and a second launch on
   the same database reads it back as done; a delete and its undo restore the
   row, and letting the toast pass leaves it gone; a rename, a move to no
-  project and a task note all come back from a relist.
+  project and a task note all come back from a relist; renaming a project
+  renames its tasks' filing, and deleting it keeps the tasks, unfiles them, and
+  undo refiles them into the restored project.
 - `apps/open-notex/tests/vault.rs` covers the launch and the dialog without a
   window: `--vault` aside, the saved folder wins over the suggested one, a saved
   folder that is gone asks and is never replaced by the default, a broken config

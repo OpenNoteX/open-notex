@@ -8,15 +8,15 @@
 use notex_time::checklist::{self, Bucket};
 use rune::{Align, Color, El, Key, KeyEvent, ScrollSpec, col, el, icon, row, text, text_input};
 use rune_kit::{
-    Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit, Toast,
-    ToastRegion,
+    Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit, Menu,
+    MenuItem, Toast, ToastRegion,
 };
 
 use crate::home::parse_color;
-use crate::state::{State, TaskRow};
+use crate::state::{ProjectEdit, State, TaskRow};
 
 /// The whole screen: header, filter chips, the add row and the list.
-pub fn tasks_pane(s: &State, k: &Kit) -> El {
+pub fn tasks_pane(s: &State, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     col()
         .key("tasks-pane")
@@ -33,7 +33,7 @@ pub fn tasks_pane(s: &State, k: &Kit) -> El {
         .children(s.task_error.as_deref().map(|error| error_line(error, k)))
         // The archive is a place to look and reopen, not a place to add: its
         // chips and add row would be about a list it is not showing.
-        .children((!s.archive).then(|| filters(s, k)))
+        .children((!s.archive).then(|| filters(s, k, layer)))
         .children((!s.archive).then(|| add_row(s, k)))
         .child(if s.archive {
             archive(s, k)
@@ -84,7 +84,7 @@ fn header(s: &State, k: &Kit) -> El {
             .variant(ButtonVariant::Ghost)
             .control_size(ControlSize::Small)
             .icon(&crate::icons::ARCHIVE)
-            .on_press(|s: &mut State| s.archive = !s.archive)
+            .on_press(|s: &mut State| s.toggle_archive())
             .build(k)
             .key("tasks-archive"),
         )
@@ -108,7 +108,7 @@ fn error_line(message: &str, k: &Kit) -> El {
         )
 }
 
-fn filters(s: &State, k: &Kit) -> El {
+fn filters(s: &State, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let mut line = row()
         .key("task-filters")
@@ -128,15 +128,43 @@ fn filters(s: &State, k: &Kit) -> El {
         ));
 
     for project in &s.projects {
-        let id = project.id.clone();
-        line = line.child(chip(
+        // A project being renamed turns its chip into a field in place.
+        if let Some(edit) = s.project_edit.as_ref().filter(|edit| edit.id == project.id) {
+            line = line.child(rename_field(edit, k));
+            continue;
+        }
+        let open = s
+            .chip_menu
+            .as_ref()
+            .filter(|menu| menu.id == project.id)
+            .cloned();
+        let pill = project_chip(
             format!("task-filter-{}", project.id),
             project.name.clone(),
             s.project_filter.as_deref() == Some(project.id.as_str()),
             project.color.as_deref().and_then(parse_color),
+            &project.id,
             k,
-            move |s: &mut State| s.set_project_filter(Some(id.clone())),
-        ));
+        );
+        let rename = project.id.clone();
+        let delete = project.id.clone();
+        let mut menu = Menu::new(format!("project-menu-{}", project.id))
+            .trigger(pill)
+            .item(
+                MenuItem::new("Rename\u{2026}")
+                    .on_select(move |s: &mut State| s.begin_project_edit(&rename)),
+            )
+            .item(
+                MenuItem::new("Delete project")
+                    .danger(true)
+                    .on_select(move |s: &mut State| s.delete_project(&delete)),
+            )
+            .on_close(|s: &mut State| s.close_chip_menu())
+            .open(open.is_some());
+        if let Some(point) = open.as_ref().and_then(|menu| menu.point) {
+            menu = menu.at(point.x, point.y);
+        }
+        line = line.child(menu.build(k, layer));
     }
 
     match &s.add_project {
@@ -174,6 +202,108 @@ fn filters(s: &State, k: &Kit) -> El {
         }
     }
     line
+}
+
+/// One project's chip, with the `⋯` that opens its menu. The dots rest at
+/// nothing and show when the pointer is on the chip or Tab reaches it, so the
+/// chip row stays quiet until someone means to change one.
+fn project_chip(
+    key: impl Into<String>,
+    label: String,
+    selected: bool,
+    dot: Option<Color>,
+    id: &str,
+    k: &Kit,
+) -> El {
+    let c = &k.c;
+    let menu_id = id.to_owned();
+    let press_id = id.to_owned();
+    let filter_id = id.to_owned();
+    let mut pill = row()
+        .key(key)
+        .label(label.clone())
+        .h(22.0)
+        .pl(8.0)
+        .pr(2.0)
+        .gap(6.0)
+        .center_y()
+        .radius(11.0)
+        .focusable(true)
+        .focus_selected(selected)
+        .hover_group()
+        .fill(if selected {
+            c.pressed
+        } else {
+            Color::TRANSPARENT
+        })
+        .border(
+            1.0,
+            if selected {
+                c.border_weak
+            } else {
+                Color::TRANSPARENT
+            },
+        )
+        .child(
+            text(label.clone())
+                .font(k.ty.text_xsmall)
+                .color(if selected { c.text_base } else { c.text_muted }),
+        );
+    if let Some(color) = dot {
+        pill = pill.child(el().size(6.0, 6.0).radius(3.0).fill(color));
+    }
+    pill = pill
+        .child(
+            row()
+                .key(format!("task-project-menu-{id}"))
+                .label(format!("Project options for {label}"))
+                .size(16.0, 16.0)
+                .center()
+                .radius(8.0)
+                .group_opacity(0.0, 1.0)
+                .on_press(move |s: &mut State| s.open_chip_menu(&menu_id, None))
+                .child(text("\u{22ef}").font(k.ty.text_xsmall).color(c.text_muted)),
+        )
+        .on_secondary_press(move |s: &mut State, point, _| {
+            s.open_chip_menu(&press_id, Some(point))
+        });
+    k.interactive(pill)
+        .on_press(move |s: &mut State| s.set_project_filter(Some(filter_id.clone())))
+}
+
+/// The chip's field while a project is renamed. It keeps the chip's shape, so
+/// the row does not jump and it is clear which chip is being changed. Return
+/// saves, Escape puts the old name back; a refused name leaves the field open
+/// with the reason above.
+fn rename_field(edit: &ProjectEdit, k: &Kit) -> El {
+    row()
+        .key("task-project-rename-frame")
+        .h(22.0)
+        .px(8.0)
+        .center_y()
+        .radius(11.0)
+        .fill(k.c.pressed)
+        .border(1.0, k.c.border_weak)
+        .child(
+            text_input(&edit.edit, k.ty.text_xsmall)
+                .single_line()
+                .key("task-project-rename")
+                .label("Project name")
+                .w(134.0)
+                .autofocus()
+                .color(k.c.text_base)
+                .caret(k.c.text_base, k.selection())
+                .on_edit(|s: &mut State| &mut s.project_edit.as_mut().unwrap().edit)
+                .on_submit(|s: &mut State, _| s.commit_project_edit())
+                .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
+                    if ev.key == Key::Escape {
+                        s.cancel_project_edit();
+                        true
+                    } else {
+                        false
+                    }
+                }),
+        )
 }
 
 /// A filter chip: a pill with an optional project dot.
@@ -749,8 +879,8 @@ fn archive_row(task: &TaskRow, k: &Kit) -> El {
 /// not clipped by the list.
 pub fn undo_toast(s: &State, k: &Kit) -> Option<El> {
     let undo = s.undo.as_ref()?;
-    let toast = Toast::new("task-undo", undo.message.clone())
-        .description("Undo for a few seconds.")
+    let toast = Toast::new("task-undo", undo.message().to_owned())
+        .description(undo.detail())
         .action(k, "Undo", false, |s: &mut State, _| s.undo_task())
         .on_close(|s: &mut State| s.dismiss_undo())
         .build(k);

@@ -39,6 +39,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         }
     };
 
+    // Overlays mount beside the view in window coordinates: dialogs, the undo
+    // toast and a project chip's menu.
+    let mut layer = Vec::new();
+
     // The route decides the layout now: Home is blocks, Tasks is one list,
     // Notes is the only list-with-detail, and the rest are single pages.
     let split = if let Some(pane) = gate {
@@ -46,7 +50,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     } else {
         match s.route.layout() {
             Layout::Dashboard => SplitView::new(home::home_pane(s, &k)),
-            Layout::List if s.route == Route::Tasks => SplitView::new(tasks::tasks_pane(s, &k)),
+            Layout::List if s.route == Route::Tasks => {
+                SplitView::new(tasks::tasks_pane(s, &k, &mut layer))
+            }
             Layout::List => SplitView::new(page_pane(s, &k, dark)),
             Layout::ListDetail => SplitView::new(list_pane(s, &k)).inspector(
                 &s.detail,
@@ -75,7 +81,6 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .reduced_motion(cx.is_reduced_motion())
         .build(&k);
 
-    let mut layer = Vec::new();
     delete_dialog(s, &k, &mut layer);
     vault_dialog(s, &k, &mut layer);
     if let Some(toast) = tasks::undo_toast(s, &k) {
@@ -275,11 +280,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
         return true;
     }
     if ev.is_command('k') {
-        s.route = Route::Search;
+        s.go(Route::Search);
         return true;
     }
     if ev.is_command(',') {
-        s.route = Route::Settings;
+        s.go(Route::Settings);
         return true;
     }
     if ev.is_command('s') {
@@ -337,7 +342,7 @@ fn nav_row(s: &State, route: Route, k: &Kit) -> El {
     SidebarRow::new(label)
         .icon(route.icon())
         .selected(s.route == route)
-        .on_select(move |s: &mut State, _| s.route = route)
+        .on_select(move |s: &mut State, _| s.go(route))
         .build(k)
         .key(format!("nav-{}", route.key()))
 }
@@ -352,7 +357,7 @@ fn toolbar(s: &State, k: &Kit) -> Toolbar {
                 .label("Search")
                 .help("Search notes, tasks and habits")
                 .shortcut("⌘K")
-                .on_press(|s: &mut State| s.route = Route::Search)
+                .on_press(|s: &mut State| s.go(Route::Search))
                 .build(k)
                 .key("open-search"),
         );

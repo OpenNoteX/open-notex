@@ -23,13 +23,20 @@ All notable changes to this project. The format follows
   due chip reads as a person would say it — `2d late`, `Today`, `Tomorrow`,
   `Fri`, `23 Nov` — and the chevron opens due buttons (Today, Tomorrow, Next
   week, Clear), the project picker and a notes field.
+- A project is maintainable from its chip: the `⋯` on hover (or a secondary
+  click) offers **Rename…** and **Delete project**. Rename is inline on the chip;
+  an empty name, or one another project holds, is refused with the field left
+  open to correct. Delete never deletes a task: its tasks move to **No project**,
+  the filter falls back to **All**, and the eight-second toast restores the
+  project and each task's filing.
 - Completing a task shows an eight-second toast whose **Undo** reopens it, and
   deleting is one press with the same way back. Done tasks move to an archive
   grouped by the day they were completed, where they can be reopened.
 - `notex-store`: a `tasks` table and `lists` (projects), `migrations/0003` with
   `due_day` and a partial index for open tasks, and `Cmd::ListTasks`,
   `ListLists`, `CreateTask`, `SetTaskTitle`, `SetTaskNotes`, `SetTaskDue`,
-  `SetTaskList`, `SetTaskDone`, `DeleteTask`, `RestoreTask` and `CreateList`.
+  `SetTaskList`, `SetTaskDone`, `DeleteTask`, `RestoreTask`, `CreateList`,
+  `SetListName`, `DeleteList` and `RestoreList`.
   Every write appends its oplog row in the same transaction. `NoteSummary`
   carries `mtime_ns`, so Home can order notes by recency.
 - `notex-time`: `Bucket`, `bucket`, `due`, `day_label` and `add_days` for due

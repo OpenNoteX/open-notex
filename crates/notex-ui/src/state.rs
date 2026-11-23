@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 
 use notex_time::checklist::{self, Bucket};
-use rune::TextEdit;
+use rune::{PointerPress, TextEdit};
 use rune_kit::shell::PaneState;
 
 use crate::routes::Route;
@@ -133,15 +133,67 @@ pub struct TaskNote {
     pub saving: bool,
 }
 
-/// The eight-second way back from a completion or a delete.
+/// The eight-second way back from a completion, a delete or a project delete.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Undo {
+pub enum Undo {
+    /// A completed task (`done`) or a deleted one (`!done`).
+    Task {
+        id: String,
+        done: bool,
+        message: String,
+        /// Seconds left. `tick` counts this down and drops the toast at zero.
+        left: f64,
+    },
+    /// A deleted project and the ids it released, so undo can refile them.
+    Project {
+        id: String,
+        task_ids: Vec<String>,
+        message: String,
+        detail: String,
+        left: f64,
+    },
+}
+
+impl Undo {
+    pub fn message(&self) -> &str {
+        match self {
+            Undo::Task { message, .. } | Undo::Project { message, .. } => message,
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            Undo::Task { .. } => "Undo for a few seconds.",
+            Undo::Project { detail, .. } => detail,
+        }
+    }
+
+    pub fn left(&self) -> f64 {
+        match self {
+            Undo::Task { left, .. } | Undo::Project { left, .. } => *left,
+        }
+    }
+
+    fn left_mut(&mut self) -> &mut f64 {
+        match self {
+            Undo::Task { left, .. } | Undo::Project { left, .. } => left,
+        }
+    }
+}
+
+/// One project's chip menu: Rename, Delete project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChipMenu {
     pub id: String,
-    /// `true` reopens the task, `false` restores the deleted row.
-    pub done: bool,
-    pub message: String,
-    /// Seconds left. `tick` counts this down and drops the toast at zero.
-    pub left: f64,
+    /// Where a secondary press landed; `None` when the chip's `⋯` opened it, so
+    /// the menu anchors under the chip instead of under the pointer.
+    pub point: Option<PointerPress>,
+}
+
+/// One project being renamed in place on its chip.
+pub struct ProjectEdit {
+    pub id: String,
+    pub edit: TextEdit,
 }
 
 /// What the detail pane holds for the selected note.
@@ -284,6 +336,18 @@ pub enum Action {
     DeleteTask(String),
     RestoreTask(String),
     CreateProject(String),
+    /// Rename a project in place. A name another project holds is refused.
+    SetProjectName {
+        id: String,
+        name: String,
+    },
+    /// Delete a project; its tasks are released to no project.
+    DeleteProject(String),
+    /// Undo a project delete and refile the tasks it released.
+    RestoreProject {
+        id: String,
+        task_ids: Vec<String>,
+    },
 }
 
 /// Where the update check stands. Settings shows it, and only a release newer
@@ -430,6 +494,10 @@ pub struct State {
     pub add_task: TextEdit,
     /// The `+ Project` field, open while it is `Some`.
     pub add_project: Option<TextEdit>,
+    /// The project whose chip menu is open, and where it opened.
+    pub chip_menu: Option<ChipMenu>,
+    /// The one project being renamed in place.
+    pub project_edit: Option<ProjectEdit>,
     /// The one task being renamed in place.
     pub task_edit: Option<TaskEdit>,
     /// The expanded row's notes field.
@@ -506,6 +574,8 @@ impl State {
             project_filter: None,
             add_task: TextEdit::new(""),
             add_project: None,
+            chip_menu: None,
+            project_edit: None,
             task_edit: None,
             task_note: None,
             expanded: None,
@@ -617,6 +687,21 @@ impl State {
     }
 
     pub fn list_changed(&mut self, project: ProjectRow) {
+        if self
+            .project_edit
+            .as_ref()
+            .is_some_and(|edit| edit.id == project.id)
+        {
+            self.project_edit = None;
+        }
+        // Rows carry their project's name and dot, so a rename shows on every
+        // task filed in it without waiting for a relist.
+        for task in &mut self.tasks {
+            if task.list_id.as_deref() == Some(project.id.as_str()) {
+                task.list_name = Some(project.name.clone());
+                task.list_color = project.color.clone();
+            }
+        }
         match self.projects.iter_mut().find(|row| row.id == project.id) {
             Some(row) => *row = project,
             None => self.projects.push(project),
@@ -737,6 +822,149 @@ impl State {
         self.project_filter = id;
     }
 
+    /// Move to a route. Leaving Tasks drops a chip menu or a rename field, so
+    /// coming back never shows one the person had forgotten about.
+    pub fn go(&mut self, route: Route) {
+        if self.route != route {
+            self.chip_menu = None;
+            self.project_edit = None;
+        }
+        self.route = route;
+    }
+
+    /// Show or hide the archive. The chip row is not on screen in it, so an
+    /// open chip menu goes with it.
+    pub fn toggle_archive(&mut self) {
+        self.archive = !self.archive;
+        self.chip_menu = None;
+        self.project_edit = None;
+    }
+
+    /// Open a project's chip menu: under the chip from `⋯`, or at the pointer
+    /// from a secondary press.
+    pub fn open_chip_menu(&mut self, id: &str, point: Option<PointerPress>) {
+        self.project_edit = None;
+        self.chip_menu = Some(ChipMenu {
+            id: id.to_owned(),
+            point,
+        });
+    }
+
+    pub fn close_chip_menu(&mut self) {
+        self.chip_menu = None;
+    }
+
+    /// Rename from the chip menu: the chip itself becomes a field, with the
+    /// caret at the end and the old name selected, so typing replaces it.
+    pub fn begin_project_edit(&mut self, id: &str) {
+        let Some(project) = self.projects.iter().find(|project| project.id == id) else {
+            return;
+        };
+        let mut edit = TextEdit::new(project.name.clone());
+        edit.focused = true;
+        // The old name is selected, so typing replaces it.
+        edit.anchor = 0;
+        edit.focus = edit.text.len();
+        self.chip_menu = None;
+        self.project_edit = Some(ProjectEdit {
+            id: id.to_owned(),
+            edit,
+        });
+    }
+
+    pub fn cancel_project_edit(&mut self) {
+        self.project_edit = None;
+    }
+
+    /// Return in a chip's field. The field stays open until the store answers,
+    /// so a refused name (one another project holds) leaves it there to correct.
+    pub fn commit_project_edit(&mut self) {
+        let Some(project) = &self.project_edit else {
+            return;
+        };
+        let name = project.edit.text.trim().to_owned();
+        if name.is_empty() {
+            self.task_error = Some("A project needs a name.".to_owned());
+            return;
+        }
+        self.task_error = None;
+        if self
+            .projects
+            .iter()
+            .any(|other| other.id == project.id && other.name == name)
+        {
+            // Nothing to write: the chip already says this.
+            self.project_edit = None;
+            return;
+        }
+        self.pending.push_back(Action::SetProjectName {
+            id: project.id.clone(),
+            name,
+        });
+    }
+
+    /// Delete a project from its chip menu. No dialog: the tasks are released,
+    /// never deleted, and the toast puts the project and their filing back.
+    pub fn delete_project(&mut self, id: &str) {
+        let Some(project) = self.projects.iter().find(|project| project.id == id) else {
+            return;
+        };
+        let task_ids: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|task| task.list_id.as_deref() == Some(id))
+            .map(|task| task.id.clone())
+            .collect();
+        self.task_error = None;
+        self.chip_menu = None;
+        self.project_edit = None;
+        self.undo = Some(Undo::Project {
+            id: id.to_owned(),
+            detail: match task_ids.len() {
+                0 => "No tasks were filed in it.".to_owned(),
+                1 => "1 task moved to No project".to_owned(),
+                count => format!("{count} tasks moved to No project"),
+            },
+            message: format!("\u{201c}{}\u{201d} deleted", project.name),
+            task_ids,
+            left: UNDO_SECONDS,
+        });
+        self.pending.push_back(Action::DeleteProject(id.to_owned()));
+    }
+
+    /// The store deleted a project: drop the chip, leave the filter on All and
+    /// unfile the tasks it released.
+    pub fn project_gone(&mut self, id: &str) {
+        self.projects.retain(|project| project.id != id);
+        if self.project_filter.as_deref() == Some(id) {
+            self.project_filter = None;
+        }
+        if self.chip_menu.as_ref().is_some_and(|menu| menu.id == id) {
+            self.chip_menu = None;
+        }
+        if self.project_edit.as_ref().is_some_and(|edit| edit.id == id) {
+            self.project_edit = None;
+        }
+        for task in &mut self.tasks {
+            if task.list_id.as_deref() == Some(id) {
+                task.list_id = None;
+                task.list_name = None;
+                task.list_color = None;
+            }
+        }
+    }
+
+    /// A project came back from a delete. The tasks the store refiled get their
+    /// project id back here, so the next frame shows them filed again.
+    pub fn list_restored(&mut self, project: ProjectRow, task_ids: &[String]) {
+        for task in &mut self.tasks {
+            if task.list_id.is_none() && task_ids.iter().any(|id| id == &task.id) {
+                task.list_id = Some(project.id.clone());
+            }
+        }
+        self.list_changed(project);
+    }
+
     /// Click the title: rename it in place, with the caret where it belongs.
     pub fn begin_edit(&mut self, id: &str) {
         let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
@@ -817,7 +1045,7 @@ impl State {
             });
             return;
         }
-        self.undo = Some(Undo {
+        self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: true,
             message: format!("\u{201c}{}\u{201d} done", task.title),
@@ -836,7 +1064,7 @@ impl State {
             return;
         };
         self.task_error = None;
-        self.undo = Some(Undo {
+        self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: false,
             message: format!("\u{201c}{}\u{201d} deleted", task.title),
@@ -847,16 +1075,15 @@ impl State {
 
     /// The toast's Undo button.
     pub fn undo_task(&mut self) {
-        let Some(undo) = self.undo.take() else {
-            return;
-        };
-        if undo.done {
-            self.pending.push_back(Action::SetTaskDone {
-                id: undo.id,
-                done: false,
-            });
-        } else {
-            self.pending.push_back(Action::RestoreTask(undo.id));
+        match self.undo.take() {
+            Some(Undo::Task { id, done: true, .. }) => self
+                .pending
+                .push_back(Action::SetTaskDone { id, done: false }),
+            Some(Undo::Task { id, .. }) => self.pending.push_back(Action::RestoreTask(id)),
+            Some(Undo::Project { id, task_ids, .. }) => self
+                .pending
+                .push_back(Action::RestoreProject { id, task_ids }),
+            None => {}
         }
     }
 
@@ -1318,8 +1545,8 @@ impl State {
         // The undo toast is the only thing on the task side that waits.
         let mut expired = false;
         if let Some(undo) = &mut self.undo {
-            undo.left -= dt;
-            expired = undo.left <= 0.0;
+            *undo.left_mut() -= dt;
+            expired = undo.left() <= 0.0;
         }
         if expired {
             self.undo = None;
@@ -1344,7 +1571,7 @@ impl State {
                     .max(0.0),
             )
         });
-        let undo = self.undo.as_ref().map(|undo| undo.left.max(0.0));
+        let undo = self.undo.as_ref().map(|undo| undo.left().max(0.0));
         match (draft, undo) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(wait), None) | (None, Some(wait)) => Some(wait),

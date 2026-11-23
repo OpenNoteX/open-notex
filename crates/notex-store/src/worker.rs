@@ -103,6 +103,20 @@ pub enum Cmd {
     CreateList {
         name: String,
     },
+    /// Rename a project in place. A name another project holds is refused.
+    SetListName {
+        id: String,
+        name: String,
+    },
+    /// Delete a project and release its tasks to no project.
+    DeleteList {
+        id: String,
+    },
+    /// Undo a project delete. `task_ids` is what `ListGone` carried.
+    RestoreList {
+        id: String,
+        task_ids: Vec<String>,
+    },
     Shutdown,
 }
 
@@ -164,8 +178,18 @@ pub enum Evt {
     TaskGone {
         id: String,
     },
-    /// A project was created by `#name`, so the chips can show it.
+    /// A project was created or renamed, so the chips can show it.
     ListChanged(crate::tasks::List),
+    /// A project was deleted. `task_ids` is what it released, for the undo.
+    ListGone {
+        id: String,
+        task_ids: Vec<String>,
+    },
+    /// A deleted project came back, and these tasks are filed into it again.
+    ListRestored {
+        list: crate::tasks::List,
+        task_ids: Vec<String>,
+    },
     /// A task write failed, in a sentence the row can show.
     TaskFailed {
         err: String,
@@ -531,6 +555,42 @@ fn execute(
                 err: error.to_string(),
             }],
         },
+        Cmd::SetListName { id, name } => {
+            match tasks::set_list_name(conn, &id, &name, now_ms(), device) {
+                Ok(Some(list)) => vec![Evt::ListChanged(list)],
+                Ok(None) => vec![Evt::TaskFailed {
+                    err: "That project is no longer there.".to_owned(),
+                }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
+        Cmd::DeleteList { id } => match tasks::delete_list(conn, &id, now_ms(), device) {
+            Ok(Some(gone)) => vec![Evt::ListGone {
+                id: gone.list.id,
+                task_ids: gone.task_ids,
+            }],
+            // Already gone is the same answer: the chips stay without it.
+            Ok(None) => vec![Evt::ListGone {
+                id,
+                task_ids: Vec::new(),
+            }],
+            Err(error) => vec![Evt::TaskFailed {
+                err: error.to_string(),
+            }],
+        },
+        Cmd::RestoreList { id, task_ids } => {
+            match tasks::restore_list(conn, &id, &task_ids, now_ms(), device) {
+                Ok(Some(list)) => vec![Evt::ListRestored { list, task_ids }],
+                Ok(None) => vec![Evt::TaskFailed {
+                    err: "That project could not be restored.".to_owned(),
+                }],
+                Err(error) => vec![Evt::TaskFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
         Cmd::Shutdown => Vec::new(),
     }
 }
