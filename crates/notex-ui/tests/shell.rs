@@ -1350,7 +1350,246 @@ fn every_task_scene_renders_its_screen() {
             "home" => assert!(rt.find("home-clock").is_some(), "home"),
             "tasks" => assert!(rt.find("task-list").is_some(), "tasks"),
             "archive" => assert!(rt.find("archive-list").is_some(), "archive"),
+            "tasks-project-menu" => {
+                assert!(rt.find("project-menu-01L1-menu").is_some(), "project menu");
+            }
+            "tasks-project-rename" => {
+                assert!(rt.find("task-project-rename").is_some(), "project rename");
+            }
+            "tasks-project-undo" => {
+                assert!(rt.find("task-undo").is_some(), "project undo toast");
+            }
             _ => {}
         }
     }
+}
+
+#[test]
+fn a_project_chip_menu_renames_the_chip_in_place() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-project-menu-01L1");
+    settle(&mut rt);
+    assert!(
+        rt.find("project-menu-01L1-menu").is_some(),
+        "the chip menu is under the chip"
+    );
+    assert!(
+        rt.state.project_filter.is_none(),
+        "the dots open the menu without narrowing the list"
+    );
+
+    click(&mut rt, "project-menu-01L1-item0");
+    settle(&mut rt);
+    assert!(
+        rt.find("task-project-rename").is_some(),
+        "the chip is a field"
+    );
+    assert!(
+        rt.state.chip_menu.is_none(),
+        "picking a row closes the menu"
+    );
+    assert_eq!(
+        rt.state
+            .project_edit
+            .as_ref()
+            .map(|edit| edit.edit.text.as_str()),
+        Some("Launch")
+    );
+
+    rt.update(|s, _| {
+        if let Some(edit) = &mut s.project_edit {
+            edit.edit.text = "Launch party".to_owned();
+        }
+        s.commit_project_edit();
+    });
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetProjectName {
+            id: "01L1".to_owned(),
+            name: "Launch party".to_owned(),
+        })
+    );
+    assert!(
+        rt.state.project_edit.is_some(),
+        "the field stays until the store answers"
+    );
+
+    rt.update(|s, _| {
+        s.list_changed(notex_ui::ProjectRow {
+            id: "01L1".to_owned(),
+            name: "Launch party".to_owned(),
+            color: Some("#3f8f6b".to_owned()),
+        })
+    });
+    assert!(
+        rt.state.project_edit.is_none(),
+        "the answer closes the field"
+    );
+    settle(&mut rt);
+    assert_eq!(label_of(&rt, "task-filter-01L1"), "Launch party");
+}
+
+#[test]
+fn a_refused_project_name_leaves_the_field_open_with_the_reason() {
+    let mut state = tasks_state();
+    state.set_projects(vec![
+        notex_ui::ProjectRow {
+            id: "01L1".to_owned(),
+            name: "Launch".to_owned(),
+            color: None,
+        },
+        notex_ui::ProjectRow {
+            id: "01L2".to_owned(),
+            name: "Studio".to_owned(),
+            color: None,
+        },
+    ]);
+    state.begin_project_edit("01L1");
+    if let Some(edit) = &mut state.project_edit {
+        edit.edit.text = "studio".to_owned();
+    }
+    state.task_failed("a project called \u{201c}studio\u{201d} already exists");
+
+    assert!(state.project_edit.is_some(), "the field stays to correct");
+    assert_eq!(
+        state.projects[0].name, "Launch",
+        "the old name is still the one shown"
+    );
+
+    state.cancel_project_edit();
+    assert!(
+        state.project_edit.is_none(),
+        "Escape puts the old chip back"
+    );
+}
+
+#[test]
+fn deleting_a_project_releases_its_tasks_and_undo_refiles_them() {
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    state.set_project_filter(Some("01L1".to_owned()));
+
+    state.delete_project("01L1");
+    assert_eq!(
+        state.take_action(),
+        Some(Action::DeleteProject("01L1".to_owned()))
+    );
+    let undo = state.undo.as_ref().expect("the toast is up");
+    assert_eq!(undo.message(), "\u{201c}Launch\u{201d} deleted");
+    assert_eq!(undo.detail(), "1 task moved to No project");
+
+    state.undo_task();
+    assert_eq!(
+        state.take_action(),
+        Some(Action::RestoreProject {
+            id: "01L1".to_owned(),
+            task_ids: vec!["01T1".to_owned()],
+        })
+    );
+
+    // Delete again and let the store answer: the chip, its filter and the
+    // task's filing all go in the same frame, and no task is deleted.
+    state.delete_project("01L1");
+    state.take_action();
+    state.project_gone("01L1");
+    assert!(state.projects.is_empty(), "the chip is gone");
+    assert!(
+        state.project_filter.is_none(),
+        "the filter falls back to All"
+    );
+    assert_eq!(state.tasks.len(), 5, "the tasks are still here");
+    let send = state.tasks.iter().find(|task| task.id == "01T1").unwrap();
+    assert_eq!(send.list_id, None, "the task is unfiled, not deleted");
+    assert_eq!(send.list_name, None);
+}
+
+#[test]
+fn a_project_chip_still_filters_when_its_name_is_pressed() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-filter-01L1");
+    assert_eq!(
+        rt.state.project_filter.as_deref(),
+        Some("01L1"),
+        "the name narrows the checklist"
+    );
+}
+
+#[test]
+fn deleting_from_the_chip_menu_is_one_press_and_a_restore() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-project-menu-01L1");
+    settle(&mut rt);
+    click(&mut rt, "project-menu-01L1-item1");
+    settle(&mut rt);
+
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::DeleteProject("01L1".to_owned()))
+    );
+    assert!(
+        rt.find("task-undo").is_some(),
+        "the toast holds the way back"
+    );
+    assert!(
+        rt.state.project_filter.is_none(),
+        "deleting never leaves a filter on a gone project"
+    );
+}
+
+#[test]
+fn leaving_tasks_drops_a_chip_menu_or_a_rename_field() {
+    let mut state = tasks_state();
+    state.route = Route::Tasks;
+    state.open_chip_menu("01L1", None);
+    state.go(Route::Home);
+    assert!(
+        state.chip_menu.is_none(),
+        "the menu does not follow the route"
+    );
+
+    state.go(Route::Tasks);
+    state.begin_project_edit("01L1");
+    state.toggle_archive();
+    assert!(state.project_edit.is_none(), "the archive has no chip row");
+    state.toggle_archive();
+    assert!(
+        state.project_edit.is_none(),
+        "coming back is a clean screen"
+    );
+}
+
+#[test]
+fn a_secondary_press_on_a_chip_opens_the_menu_at_the_pointer() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    let (x, y) = rt.find("task-filter-01L1").unwrap();
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+
+    assert!(
+        rt.find("project-menu-01L1-menu").is_some(),
+        "a right click is the other way into the menu"
+    );
+    assert!(
+        rt.state.project_filter.is_none(),
+        "opening the menu does not also narrow the list"
+    );
+    let menu = element(&rt, "project-menu-01L1-menu");
+    assert!(
+        menu.rect[0] >= x - 1.0 && menu.rect[0] <= x + 1.0,
+        "the menu starts at the pointer: {} vs {x}",
+        menu.rect[0]
+    );
 }

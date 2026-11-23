@@ -196,3 +196,16 @@ is the invariant that matters: losing the database costs an index, not a note.
 Tasks are the app's own records and are exported from the oplog rather than
 scanned from the vault. *Reopen when* sync lands: the oplog is then the source
 for task rows on another machine, and this decision should name the export shape.
+
+## 0019 — A project is a grouping: deleting one never deletes its tasks
+
+A project (`lists`) does not own a task; `tasks.list_id` is a nullable filing.
+Deleting a project soft-deletes the project row and clears `list_id` on its
+tasks in one transaction, with an oplog row for each task it released. Undo
+calls `restore_list` with the ids the delete released, and refiles only tasks
+that are still unfiled — a task moved somewhere else in the meantime stays where
+the person put it. Names are unique case-insensitively among live projects, so a
+rename or a restore that would collide is a typed refusal, never two `Launch`
+chips. A delete is therefore one press behind the usual eight-second toast: the
+blast radius is a label, not data. *Reopen when* projects gain colour choices or
+merging: those change a project's identity, not a task's filing.

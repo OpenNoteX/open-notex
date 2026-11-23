@@ -226,6 +226,26 @@ pub const SCENES: &[Scene] = &[
         s.toggle_task("01T4");
         s.load = Load::Ready;
     }),
+    ("tasks-project-menu", |s| {
+        seed_tasks(s);
+        s.route = Route::Tasks;
+        s.open_chip_menu("01L1", None);
+        s.load = Load::Ready;
+    }),
+    ("tasks-project-rename", |s| {
+        seed_tasks(s);
+        s.route = Route::Tasks;
+        s.begin_project_edit("01L1");
+        s.load = Load::Ready;
+    }),
+    ("tasks-project-undo", |s| {
+        seed_tasks(s);
+        s.route = Route::Tasks;
+        s.delete_project("01L1");
+        // The store's answer, in the same frame as the toast.
+        s.project_gone("01L1");
+        s.load = Load::Ready;
+    }),
     ("archive", |s| {
         seed_tasks(s);
         s.route = Route::Tasks;

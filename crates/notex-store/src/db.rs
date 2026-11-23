@@ -43,6 +43,10 @@ pub enum StoreError {
     InvalidPath(String),
     #[error("worker stopped")]
     WorkerStopped,
+    #[error("a project called \u{201c}{0}\u{201d} already exists")]
+    DuplicateList(String),
+    #[error("a project needs a name")]
+    EmptyListName,
 }
 
 /// Open a database, apply pragmas and run migrations.

@@ -406,6 +406,21 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
                     state.task_failed("The store is no longer running.");
                 }
             }
+            Action::SetProjectName { id, name } => {
+                if handle.send(Cmd::SetListName { id, name }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::DeleteProject(id) => {
+                if handle.send(Cmd::DeleteList { id }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
+            Action::RestoreProject { id, task_ids } => {
+                if handle.send(Cmd::RestoreList { id, task_ids }).is_err() {
+                    state.task_failed("The store is no longer running.");
+                }
+            }
             Action::Save(request) => {
                 let id = request.id.clone();
                 let sent = handle.send(Cmd::SaveNote {
@@ -524,6 +539,14 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
         }
         Evt::ListChanged(list) => {
             state.list_changed(project_row(list));
+            true
+        }
+        Evt::ListGone { id, .. } => {
+            state.project_gone(&id);
+            true
+        }
+        Evt::ListRestored { list, task_ids } => {
+            state.list_restored(project_row(list), &task_ids);
             true
         }
         Evt::TaskFailed { err } => {

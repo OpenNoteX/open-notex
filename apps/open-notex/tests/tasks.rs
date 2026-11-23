@@ -318,3 +318,51 @@ fn a_task_note_is_saved_and_comes_back_on_the_next_open() {
     );
     assert!(rt.find(&format!("task-notes-{id}")).is_some());
 }
+
+#[test]
+fn a_renamed_project_renames_its_tasks_filing_and_a_delete_keeps_the_tasks() {
+    let (mut rt, session, _dir) = open_tasks();
+    add_line(&mut rt, "Send invites #Launch");
+    settle(&mut rt, &session, "the task", |state| {
+        state.tasks.len() == 1
+    });
+    let project = rt.state.projects[0].id.clone();
+
+    rt.state.begin_project_edit(&project);
+    rt.state
+        .project_edit
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text("Launch party");
+    rt.state.commit_project_edit();
+    settle(&mut rt, &session, "the rename", |state| {
+        state.projects[0].name == "Launch party"
+    });
+    assert_eq!(
+        rt.state.tasks[0].list_name.as_deref(),
+        Some("Launch party"),
+        "the task reads its project through the join"
+    );
+    assert!(
+        rt.state.project_edit.is_none(),
+        "the field closed on success"
+    );
+
+    // Deleting the project releases the task to No project; it is never deleted.
+    rt.state.delete_project(&project);
+    settle(&mut rt, &session, "the project delete", |state| {
+        state.projects.is_empty()
+    });
+    assert_eq!(rt.state.tasks.len(), 1);
+    assert_eq!(rt.state.tasks[0].list_id, None);
+    assert_eq!(rt.state.tasks[0].list_name, None);
+
+    // Undo brings the project back and refiles the task exactly where it was.
+    rt.state.undo_task();
+    settle(&mut rt, &session, "the project restore", |state| {
+        !state.projects.is_empty()
+    });
+    assert_eq!(rt.state.projects[0].name, "Launch party");
+    assert_eq!(rt.state.tasks[0].list_id.as_deref(), Some(project.as_str()));
+}

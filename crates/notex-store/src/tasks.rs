@@ -46,6 +46,14 @@ pub struct Created {
     pub list: Option<List>,
 }
 
+/// A deleted project and the tasks it released. The ids are what undo needs to
+/// put each task back where it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListGone {
+    pub list: List,
+    pub task_ids: Vec<String>,
+}
+
 const SELECT: &str = "\
 SELECT t.id, t.title, t.notes, t.status, t.list_id, l.name, l.color,
        t.due_day, t.completed_at, t.created_at, t.rev
@@ -333,6 +341,190 @@ pub fn create_list(
     Ok(list)
 }
 
+/// Rename a project. The name is trimmed here; an empty one and a name another
+/// project already holds are refused, so the chips can never show two
+/// `Launch`s. `None` means the row is gone (deleted elsewhere).
+pub fn set_list_name(
+    conn: &mut Connection,
+    id: &str,
+    name: &str,
+    now: i64,
+    device_id: &str,
+) -> Result<Option<List>, StoreError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(StoreError::EmptyListName);
+    }
+    let tx = conn.transaction()?;
+    if tx
+        .query_row(
+            "SELECT 1 FROM lists
+             WHERE deleted_at IS NULL AND name = ?1 COLLATE NOCASE AND id <> ?2",
+            params![name, id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some()
+    {
+        return Err(StoreError::DuplicateList(name.to_owned()));
+    }
+    let changed = tx.execute(
+        "UPDATE lists SET name = ?2, updated_at = ?3, rev = rev + 1
+         WHERE id = ?1 AND deleted_at IS NULL",
+        params![id, name, now],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    oplog::append(
+        &tx,
+        oplog::Entry {
+            payload: &json(&[("name", name)]),
+            at: now,
+            device_id,
+            ..oplog::Entry::new("list", id, "rename")
+        },
+    )?;
+    let list = tx.query_row(
+        "SELECT id, name, color, position FROM lists WHERE id = ?1",
+        [id],
+        row_to_list,
+    )?;
+    tx.commit()?;
+    Ok(Some(list))
+}
+
+/// Delete a project and release its tasks to **No project** in the same
+/// transaction. Every released task gets its own oplog row, so an export can
+/// rebuild the unfiling without guessing. The tasks themselves are untouched:
+/// a project is a grouping, never the owner of a task.
+pub fn delete_list(
+    conn: &mut Connection,
+    id: &str,
+    now: i64,
+    device_id: &str,
+) -> Result<Option<ListGone>, StoreError> {
+    let tx = conn.transaction()?;
+    let Some(list) = tx
+        .query_row(
+            "SELECT id, name, color, position FROM lists
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            row_to_list,
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+
+    let task_ids: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM tasks WHERE list_id = ?1 AND deleted_at IS NULL ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([id], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for task_id in &task_ids {
+        tx.execute(
+            "UPDATE tasks SET list_id = NULL, updated_at = ?2, rev = rev + 1
+             WHERE id = ?1 AND list_id = ?3 AND deleted_at IS NULL",
+            params![task_id, now, id],
+        )?;
+        oplog::append(
+            &tx,
+            oplog::Entry {
+                payload: &json(&[("list_id", "")]),
+                at: now,
+                device_id,
+                ..oplog::Entry::new("task", task_id, "project")
+            },
+        )?;
+    }
+    tx.execute(
+        "UPDATE lists SET deleted_at = ?2, updated_at = ?2, rev = rev + 1 WHERE id = ?1",
+        params![id, now],
+    )?;
+    oplog::append(
+        &tx,
+        oplog::Entry {
+            at: now,
+            device_id,
+            ..oplog::Entry::new("list", id, "delete")
+        },
+    )?;
+    tx.commit()?;
+    Ok(Some(ListGone { list, task_ids }))
+}
+
+/// Undo a project delete. `task_ids` is the list the delete released, so the
+/// tasks come back filed exactly as they were; a task moved somewhere else in
+/// the meantime is left alone. A name taken since the delete is refused rather
+/// than making two projects with one name.
+pub fn restore_list(
+    conn: &mut Connection,
+    id: &str,
+    task_ids: &[String],
+    now: i64,
+    device_id: &str,
+) -> Result<Option<List>, StoreError> {
+    let tx = conn.transaction()?;
+    let Some(list) = tx
+        .query_row(
+            "SELECT id, name, color, position FROM lists
+             WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+            row_to_list,
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    if tx
+        .query_row(
+            "SELECT 1 FROM lists
+             WHERE deleted_at IS NULL AND name = ?1 COLLATE NOCASE AND id <> ?2",
+            params![list.name, id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some()
+    {
+        return Err(StoreError::DuplicateList(list.name));
+    }
+    tx.execute(
+        "UPDATE lists SET deleted_at = NULL, updated_at = ?2, rev = rev + 1 WHERE id = ?1",
+        params![id, now],
+    )?;
+    oplog::append(
+        &tx,
+        oplog::Entry {
+            at: now,
+            device_id,
+            ..oplog::Entry::new("list", id, "restore")
+        },
+    )?;
+    for task_id in task_ids {
+        let changed = tx.execute(
+            "UPDATE tasks SET list_id = ?2, updated_at = ?3, rev = rev + 1
+             WHERE id = ?1 AND list_id IS NULL AND deleted_at IS NULL",
+            params![task_id, id, now],
+        )?;
+        if changed > 0 {
+            oplog::append(
+                &tx,
+                oplog::Entry {
+                    payload: &json(&[("list_id", id)]),
+                    at: now,
+                    device_id,
+                    ..oplog::Entry::new("task", task_id, "project")
+                },
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(Some(list))
+}
+
 /// Find a project by name, or make one at the end of the chips. Names are
 /// matched case-insensitively so `#Launch` and `#launch` are one project.
 fn get_or_create_list(
@@ -568,6 +760,207 @@ mod tests {
         assert_eq!(cleared.due_day, None);
         // create task, create project, due, project, due
         assert_eq!(oplog::len(&conn).unwrap(), 5);
+    }
+
+    #[test]
+    fn a_project_is_renamed_in_place_and_the_tasks_follow_the_join() {
+        let mut conn = db::open_in_memory().unwrap();
+        let created = create(
+            &mut conn,
+            "Send invites",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap();
+        let list = created.list.unwrap();
+
+        let renamed = set_list_name(&mut conn, &list.id, "  Launch party  ", now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "Launch party");
+        assert_eq!(renamed.id, list.id);
+        assert_eq!(
+            task(&conn, &created.task.id)
+                .unwrap()
+                .unwrap()
+                .list_name
+                .as_deref(),
+            Some("Launch party"),
+            "the task reads its project through the join"
+        );
+        assert_eq!(oplog::len(&conn).unwrap(), 3, "create, task, rename");
+    }
+
+    #[test]
+    fn a_project_cannot_take_a_name_another_is_using() {
+        let mut conn = db::open_in_memory().unwrap();
+        let launch = create_list(&mut conn, "Launch", now(), "dev").unwrap();
+        let studio = create_list(&mut conn, "Studio", now(), "dev").unwrap();
+
+        let refused = set_list_name(&mut conn, &studio.id, "launch", now() + 1, "dev");
+        assert!(matches!(
+            refused,
+            Err(StoreError::DuplicateList(name)) if name == "launch"
+        ));
+        assert_eq!(
+            lists(&conn)
+                .unwrap()
+                .into_iter()
+                .map(|l| l.name)
+                .collect::<Vec<_>>(),
+            ["Launch", "Studio"]
+        );
+        // Renaming a project to its own name, whatever the case, is fine.
+        let same = set_list_name(&mut conn, &launch.id, "LAUNCH", now() + 2, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(same.name, "LAUNCH");
+    }
+
+    #[test]
+    fn a_project_needs_a_name() {
+        let mut conn = db::open_in_memory().unwrap();
+        let list = create_list(&mut conn, "Launch", now(), "dev").unwrap();
+        assert!(matches!(
+            set_list_name(&mut conn, &list.id, "   ", now(), "dev"),
+            Err(StoreError::EmptyListName)
+        ));
+        assert_eq!(lists(&conn).unwrap()[0].name, "Launch");
+    }
+
+    #[test]
+    fn deleting_a_project_releases_its_tasks_and_undo_refiles_them() {
+        let mut conn = db::open_in_memory().unwrap();
+        let created = create(
+            &mut conn,
+            "Send invites",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap();
+        let list = created.list.unwrap();
+        let unfiled = create(&mut conn, "Read the notes", None, None, now(), "dev")
+            .unwrap()
+            .task;
+
+        let gone = delete_list(&mut conn, &list.id, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(gone.list.id, list.id);
+        assert_eq!(gone.task_ids, std::slice::from_ref(&created.task.id));
+        assert!(lists(&conn).unwrap().is_empty(), "the chip is gone");
+        assert_eq!(
+            task(&conn, &created.task.id).unwrap().unwrap().list_id,
+            None,
+            "the task is unfiled, not deleted"
+        );
+        assert_eq!(
+            task(&conn, &unfiled.id).unwrap().unwrap().list_id,
+            None,
+            "a task that was never filed is untouched"
+        );
+        // create + task, the unfiled create, the released task, the list delete
+        assert_eq!(oplog::len(&conn).unwrap(), 5);
+
+        let restored = restore_list(&mut conn, &list.id, &gone.task_ids, now() + 2, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.name, "Launch");
+        assert_eq!(
+            task(&conn, &created.task.id)
+                .unwrap()
+                .unwrap()
+                .list_name
+                .as_deref(),
+            Some("Launch"),
+            "undo puts the task back where it was"
+        );
+        assert_eq!(lists(&conn).unwrap().len(), 1);
+        // list restore and the task's project row
+        assert_eq!(oplog::len(&conn).unwrap(), 7);
+    }
+
+    #[test]
+    fn undo_leaves_a_task_that_moved_elsewhere_alone() {
+        let mut conn = db::open_in_memory().unwrap();
+        let created = create(
+            &mut conn,
+            "Send invites",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap();
+        let launch = created.list.unwrap();
+        let studio = create_list(&mut conn, "Studio", now(), "dev").unwrap();
+
+        let gone = delete_list(&mut conn, &launch.id, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+        set_list(
+            &mut conn,
+            &created.task.id,
+            Some(&studio.id),
+            now() + 2,
+            "dev",
+        )
+        .unwrap();
+        restore_list(&mut conn, &launch.id, &gone.task_ids, now() + 3, "dev").unwrap();
+
+        assert_eq!(
+            task(&conn, &created.task.id)
+                .unwrap()
+                .unwrap()
+                .list_name
+                .as_deref(),
+            Some("Studio"),
+            "a refiled task stays where the person put it"
+        );
+    }
+
+    #[test]
+    fn a_restore_does_not_make_two_projects_with_one_name() {
+        let mut conn = db::open_in_memory().unwrap();
+        let created = create(
+            &mut conn,
+            "Send invites",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap();
+        let launch = created.list.unwrap();
+        let gone = delete_list(&mut conn, &launch.id, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+        let again = create_list(&mut conn, "Launch", now() + 2, "dev").unwrap();
+
+        let refused = restore_list(&mut conn, &launch.id, &gone.task_ids, now() + 3, "dev");
+        assert!(matches!(
+            refused,
+            Err(StoreError::DuplicateList(name)) if name == "Launch"
+        ));
+        assert_eq!(lists(&conn).unwrap(), [again]);
+    }
+
+    #[test]
+    fn a_missing_project_is_none_not_an_error() {
+        let mut conn = db::open_in_memory().unwrap();
+        assert_eq!(
+            set_list_name(&mut conn, "nope", "x", now(), "dev").unwrap(),
+            None
+        );
+        assert_eq!(delete_list(&mut conn, "nope", now(), "dev").unwrap(), None);
+        assert_eq!(
+            restore_list(&mut conn, "nope", &[], now(), "dev").unwrap(),
+            None
+        );
     }
 
     #[test]
