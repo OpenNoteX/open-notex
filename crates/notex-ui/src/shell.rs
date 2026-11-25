@@ -118,7 +118,10 @@ fn delete_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
         .child(
             Button::new("Delete")
                 .variant(ButtonVariant::Danger)
-                .on_press(|s: &mut State| s.confirm_delete())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.confirm_delete();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("delete-confirm"),
         );
@@ -218,8 +221,13 @@ fn vault_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
                 directory: Some(std::path::PathBuf::from(start.clone())),
                 ..FileDialogOptions::default()
             };
-            tx.open_folder(options, |s: &mut State, result, _| match result {
-                Ok(Some(path)) => s.choose_vault(path.to_string_lossy().into_owned()),
+            tx.open_folder(options, |s: &mut State, result, tx| match result {
+                Ok(Some(path)) => {
+                    s.choose_vault(path.to_string_lossy().into_owned());
+                    // The sheet closes after the frame's poll, so opening the
+                    // folder needs its own frame, like any other queued action.
+                    s.flush(tx);
+                }
                 Ok(None) => {}
                 Err(error) => s.vault_failed(format!("The folder chooser did not open: {error}")),
             });
@@ -231,7 +239,10 @@ fn vault_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
         .variant(ButtonVariant::Submit)
         .control_size(ControlSize::Small)
         .disabled(busy || !setup.status.can_open())
-        .on_press(|s: &mut State| s.vault_primary())
+        .on_press_tx(|s: &mut State, tx| {
+            s.vault_primary();
+            s.flush(tx);
+        })
         .build(k)
         .key("vault-primary");
 
@@ -274,7 +285,7 @@ fn vault_dialog(s: &State, k: &Kit, layer: &mut Vec<El>) {
 
 /// Keys the shell answers itself: the sidebar toggle, search and settings.
 /// Anything else falls through to the focused control.
-pub fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if rune_kit::shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
         return true;
@@ -289,14 +300,17 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _: &mut Tx) -> bool {
     }
     if ev.is_command('s') {
         s.request_save();
+        s.flush(tx);
         return true;
     }
     if ev.is_command('n') {
         s.request_create();
+        s.flush(tx);
         return true;
     }
     if ev.mods.cmd && matches!(ev.key, Key::Backspace | Key::Delete) {
         s.request_delete();
+        s.flush(tx);
         return true;
     }
     false
@@ -426,7 +440,10 @@ fn new_note_button(s: &State, k: &Kit) -> El {
         .control_size(ControlSize::Small)
         .label("New note")
         .help("New note (⌘N)")
-        .on_press(|s: &mut State| s.request_create())
+        .on_press_tx(|s: &mut State, tx| {
+            s.request_create();
+            s.flush(tx);
+        })
         .build(k)
         .key("new-note")
 }
@@ -461,7 +478,10 @@ fn note_list(s: &State, k: &Kit) -> El {
             let mut row = SidebarRow::new(&note.title)
                 .icon(&crate::icons::NOTES)
                 .selected(s.selected.as_deref() == Some(note.id.as_str()))
-                .on_select(move |s: &mut State, _| s.select_note(&id));
+                .on_select(move |s: &mut State, tx| {
+                    s.select_note(&id);
+                    s.flush(tx);
+                });
             if !tags.is_empty() {
                 row = row.subtitle(tags);
             }
@@ -764,7 +784,10 @@ fn status_row(draft: &Draft, k: &Kit) -> El {
             Button::new("Save")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut State| s.request_save())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.request_save();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("save-note"),
         );
@@ -788,9 +811,10 @@ fn editor(draft: &Draft, k: &Kit) -> El {
         .spellcheck(true)
         .on_edit(|s: &mut State| &mut s.draft.as_mut().unwrap().edit)
         .on_input_change(|s: &mut State, _| s.draft_touched())
-        .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
+        .on_input_key(|s: &mut State, ev: &KeyEvent, tx| {
             if ev.is_command('s') {
                 s.request_save();
+                s.flush(tx);
                 true
             } else {
                 false
@@ -833,7 +857,10 @@ fn conflict_banner(message: &str, k: &Kit) -> El {
             Button::new("Reload")
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut State| s.request_reload())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.request_reload();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("conflict-reload"),
         )
@@ -841,7 +868,10 @@ fn conflict_banner(message: &str, k: &Kit) -> El {
             Button::new("Overwrite")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut State| s.request_overwrite())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.request_overwrite();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("conflict-overwrite"),
         )
@@ -869,7 +899,10 @@ fn error_banner(message: &str, k: &Kit) -> El {
             Button::new("Try again")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut State| s.request_save())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.request_save();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("save-retry"),
         )
@@ -1087,7 +1120,10 @@ fn update_banner(version: &str, k: &Kit) -> El {
                 Button::new(format!("View openNoteX {target}"))
                     .variant(ButtonVariant::Outline)
                     .control_size(ControlSize::Small)
-                    .on_press(move |s: &mut State| s.request_release(open.clone()))
+                    .on_press_tx(move |s: &mut State, tx| {
+                        s.request_release(open.clone());
+                        s.flush(tx);
+                    })
                     .build(k)
                     .key("update-view"),
             ),
@@ -1121,7 +1157,10 @@ fn update_row(s: &State, k: &Kit) -> El {
             Button::new("Check now")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut State| s.request_update_check())
+                .on_press_tx(|s: &mut State, tx| {
+                    s.request_update_check();
+                    s.flush(tx);
+                })
                 .build(k)
                 .key("update-check"),
         )

@@ -214,6 +214,14 @@ pub const SCENES: &[Scene] = &[
         s.set_project_filter(Some("01L1".to_owned()));
         s.load = Load::Ready;
     }),
+    ("tasks-add-pending", |s| {
+        seed_tasks(s);
+        s.route = Route::Tasks;
+        // The row is here before the store's answer: the point of the scene.
+        s.add_task.replace_text("Send the invitations #Launch");
+        s.add_task_now();
+        s.load = Load::Ready;
+    }),
     ("task-expanded", |s| {
         seed_tasks(s);
         s.route = Route::Tasks;
