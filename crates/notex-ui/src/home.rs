@@ -252,9 +252,10 @@ fn home_note(note: &NoteRow, k: &Kit) -> El {
         .label(note.title.clone())
         .focusable(true)
         .hover_group()
-        .on_press(move |s: &mut State| {
+        .on_press_tx(move |s: &mut State, tx| {
             s.route = Route::Notes;
             s.select_note(&id);
+            s.flush(tx);
         });
     line = line.child(
         text(note.title.clone())
@@ -293,7 +294,10 @@ fn home_task(task: &TaskRow, today: &str, k: &Kit) -> El {
             Checkbox::new(task.done)
                 .label(format!("Mark \u{201c}{}\u{201d} done", task.title))
                 .hide_label()
-                .on_toggle(move |s: &mut State| s.toggle_task(&check_id))
+                .on_toggle_tx(move |s: &mut State, tx| {
+                    s.toggle_task(&check_id);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("home-check-{}", task.id)),
         )

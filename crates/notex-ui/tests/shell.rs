@@ -1084,6 +1084,156 @@ fn typing_a_line_and_pressing_return_asks_for_a_task_and_keeps_the_field() {
 }
 
 #[test]
+fn return_in_the_add_row_asks_for_the_next_frame_at_once() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-add-input");
+    rt.paste("Water the plants");
+    rt.frame(1.0 / 60.0);
+
+    press(&mut rt, Key::Enter);
+
+    // `poll` runs before the handler that queues the create, so without a wake
+    // the command would sit until the next pointer or key event. Due now, not
+    // a blink or a fade later.
+    let deadline = rt
+        .wake_deadline()
+        .expect("the queued create asks for a frame");
+    assert!(
+        deadline <= rt.clock,
+        "the wake is due now, not at {deadline} with the clock at {}",
+        rt.clock
+    );
+}
+
+#[test]
+fn a_pointer_press_on_a_task_asks_for_the_next_frame_at_once() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    click(&mut rt, "task-check-01T1");
+
+    let deadline = rt
+        .wake_deadline()
+        .expect("the queued write asks for a frame");
+    assert!(
+        deadline <= rt.clock,
+        "the wake is due now, not at {deadline} with the clock at {}",
+        rt.clock
+    );
+}
+
+#[test]
+fn the_new_task_shows_before_the_store_answers() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-add-input");
+    rt.paste("Send invites #Launch");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+
+    // The checklist has the row in the frame Return was handled in; nothing has
+    // been pumped to the store.
+    assert!(
+        rt.find("task-row-new-0").is_some(),
+        "the typed task is on screen before the store answers"
+    );
+    assert!(rt.find("task-group-someday").is_some(), "it is in No date");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateTask {
+            title: "Send invites".to_owned(),
+            project: Some("Launch".to_owned()),
+            due_day: None,
+        })
+    );
+
+    // Its controls wait for the real id: a temporary one is not sent anywhere.
+    click(&mut rt, "task-check-new-0");
+    assert_eq!(rt.state.take_action(), None, "the row is not writable yet");
+    let pending = rt
+        .state
+        .tasks
+        .iter()
+        .find(|task| task.id == "new-0")
+        .expect("the optimistic row is still there");
+    assert!(!pending.done, "the box did not move");
+}
+
+#[test]
+fn the_store_row_takes_the_optimistic_rows_place() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-add-input");
+    rt.paste("Water the plants");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.take_action().is_some());
+
+    rt.state.task_changed(notex_ui::TaskRow {
+        id: "01T9".to_owned(),
+        title: "Water the plants".to_owned(),
+        notes: String::new(),
+        done: false,
+        list_id: None,
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: None,
+        completed_day: None,
+    });
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+
+    assert!(
+        rt.find("task-row-new-0").is_none(),
+        "the temporary row is gone"
+    );
+    assert!(rt.find("task-row-01T9").is_some(), "the real row is here");
+    assert_eq!(
+        rt.state
+            .tasks
+            .iter()
+            .filter(|task| task.title == "Water the plants")
+            .count(),
+        1,
+        "the task is not listed twice"
+    );
+    assert!(rt.state.pending_adds.is_empty());
+}
+
+#[test]
+fn a_refused_create_puts_the_line_back_and_takes_the_row_away() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-add-input");
+    rt.paste("Send invites #Launch");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.take_action().is_some());
+
+    rt.state.add_failed("The vault is read-only.");
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+
+    assert!(
+        rt.find("task-row-new-0").is_none(),
+        "the refused row is gone"
+    );
+    assert_eq!(
+        rt.state.add_task.text, "Send invites #Launch",
+        "the whole line is back, project tag included"
+    );
+    assert_eq!(label_of(&rt, "task-error-text"), "The vault is read-only.");
+    assert!(rt.state.pending_adds.is_empty());
+}
+
+#[test]
 fn an_empty_add_row_asks_for_nothing() {
     let mut rt = runtime(tasks_state());
     click(&mut rt, "nav-tasks");

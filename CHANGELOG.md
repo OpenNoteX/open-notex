@@ -36,7 +36,9 @@ All notable changes to this project. The format follows
   `due_day` and a partial index for open tasks, and `Cmd::ListTasks`,
   `ListLists`, `CreateTask`, `SetTaskTitle`, `SetTaskNotes`, `SetTaskDue`,
   `SetTaskList`, `SetTaskDone`, `DeleteTask`, `RestoreTask`, `CreateList`,
-  `SetListName`, `DeleteList` and `RestoreList`.
+  `SetListName`, `DeleteList` and `RestoreList`; a refused create is
+  `Evt::TaskCreateFailed`, separate from another task write's `TaskFailed` so
+  the add row can give the typed line back.
   Every write appends its oplog row in the same transaction. `NoteSummary`
   carries `mtime_ns`, so Home can order notes by recency.
 - `notex-time`: `Bucket`, `bucket`, `due`, `day_label` and `add_days` for due
@@ -173,6 +175,12 @@ All notable changes to this project. The format follows
 
 ### Fixed
 
+- A task typed in the add row did not reach the store until the next pointer or
+  key event: `poll` sends what the handlers queued, and it runs before the
+  handler that queues, so a command typed in a field had no frame of its own.
+  Every handler that queues work now asks for the next frame, and the typed row
+  is in the checklist before the store answers — replaced in place when the real
+  id arrives, and given back to the field with the text if the create is refused.
 - A note deleted or renamed outside the app stayed in the list after a reindex,
   and opening it failed. A reindex now prunes rows whose file the scan did not
   find, and logs the delete.

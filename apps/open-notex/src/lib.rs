@@ -553,6 +553,12 @@ fn apply(state: &mut State, handle: &StoreHandle, event: Evt) -> bool {
             state.task_failed(err);
             true
         }
+        // The add row was showing this task already: take that row away and put
+        // the typed line back, so a refused create costs nothing.
+        Evt::TaskCreateFailed { err } => {
+            state.add_failed(err);
+            true
+        }
         Evt::Failed { op, err } => {
             state.load = Load::Failed(format!("{op}: {err}"));
             true

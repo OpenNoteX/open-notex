@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 
 use notex_time::checklist::{self, Bucket};
-use rune::{PointerPress, TextEdit};
+use rune::{PointerPress, TextEdit, Tx};
 use rune_kit::shell::PaneState;
 
 use crate::routes::Route;
@@ -33,6 +33,16 @@ pub enum Load {
 
 /// How long the undo toast holds a completed or deleted task.
 pub const UNDO_SECONDS: f64 = 8.0;
+
+/// A task typed in the add row that the store has not answered yet. The row is
+/// already in the checklist under `temp_id`; the answer replaces it in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAdd {
+    /// The row's id until the store's ULID arrives. Never sent anywhere.
+    pub temp_id: String,
+    /// The line exactly as typed, so a refusal can put it back in the field.
+    pub text: String,
+}
 
 /// A row in the notes list. The body is not here: it is read on demand, so a long
 /// vault never sits in memory.
@@ -512,6 +522,11 @@ pub struct State {
     pub task_error: Option<String>,
     /// Task commands waiting for `take_action`. Handlers push; the view never sends.
     pending: VecDeque<Action>,
+    /// Tasks typed in the add row whose `CreateTask` the store has not answered,
+    /// oldest first. The checklist shows them under a temporary id.
+    pub pending_adds: VecDeque<PendingAdd>,
+    /// Counts temporary ids, so two queued adds never share a row key.
+    next_temp: u64,
     /// The selected note's id; `None` when the list has no selection.
     pub selected: Option<String>,
     /// The selected note's body, or why it is not here yet.
@@ -583,6 +598,8 @@ impl State {
             undo: None,
             task_error: None,
             pending: VecDeque::new(),
+            pending_adds: VecDeque::new(),
+            next_temp: 0,
             selected: None,
             body: NoteBody::None,
             draft: None,
@@ -659,9 +676,21 @@ impl State {
     /// A task after a write. The row is replaced in place, so the list does not
     /// jump while it is being read.
     pub fn task_changed(&mut self, task: TaskRow) {
-        match self.tasks.iter_mut().find(|row| row.id == task.id) {
-            Some(row) => *row = task,
-            None => self.tasks.push(task),
+        if !self.tasks.iter().any(|row| row.id == task.id)
+            && let Some(pending) = self.pending_adds.pop_front()
+        {
+            // The store's answer to a queued create: its row takes the optimistic
+            // row's place, so the checklist never shows the same task twice.
+            match self.tasks.iter_mut().find(|row| row.id == pending.temp_id) {
+                Some(row) => *row = task,
+                // The row went away before its answer (a refusal, a race): the
+                // answer is still a real task, so it arrives.
+                None => self.tasks.push(task),
+            }
+        } else if let Some(row) = self.tasks.iter_mut().find(|row| row.id == task.id) {
+            *row = task;
+        } else {
+            self.tasks.push(task);
         }
         self.sort_tasks();
         // The notes field says "Saving…" until the write that carried its text
@@ -672,6 +701,23 @@ impl State {
         {
             note.saving = false;
         }
+    }
+
+    /// A row that the store has not answered yet. Its temporary id is not one
+    /// the store knows, so the controls on it wait for the real row.
+    pub fn is_pending_add(&self, id: &str) -> bool {
+        self.pending_adds.iter().any(|add| add.temp_id == id)
+    }
+
+    /// The store refused a new task. Its row goes and the line comes back to
+    /// the field, so nothing typed has to be typed again.
+    pub fn add_failed(&mut self, error: impl Into<String>) {
+        if let Some(pending) = self.pending_adds.pop_front() {
+            self.tasks.retain(|task| task.id != pending.temp_id);
+            self.add_task.replace_text(pending.text);
+            self.prune_task_editors();
+        }
+        self.task_error = Some(error.into());
     }
 
     /// The row is gone (deleted here or elsewhere).
@@ -769,10 +815,11 @@ impl State {
         notes
     }
 
-    /// Return in the add row. The line is parsed, the field is cleared and the
-    /// command is queued. An empty line does nothing.
+    /// Return in the add row. The line is parsed, the row shows at once, the
+    /// field is cleared and the command is queued. An empty line does nothing.
     pub fn add_task_now(&mut self) {
-        let Some(input) = notex_core::parse_task_input(&self.add_task.text) else {
+        let text = self.add_task.text.clone();
+        let Some(input) = notex_core::parse_task_input(&text) else {
             return;
         };
         let project = input.project.or_else(|| {
@@ -784,6 +831,36 @@ impl State {
                     .map(|project| project.name.clone())
             })
         });
+        // The row is here before the store answers, so Return reads as done.
+        // `task_changed` swaps the store's row in under the same place, and
+        // `add_failed` takes this one away and puts the line back.
+        // A project that already exists gets its chip at once; one the command
+        // is about to create has no id to show until the answer.
+        let known = project.as_ref().and_then(|name| {
+            self.projects
+                .iter()
+                .find(|project| project.name.eq_ignore_ascii_case(name))
+        });
+        let (list_id, list_color) = match known {
+            Some(project) => (Some(project.id.clone()), project.color.clone()),
+            None => (None, None),
+        };
+        let temp_id = format!("new-{}", self.next_temp);
+        self.next_temp += 1;
+        self.tasks.push(TaskRow {
+            id: temp_id.clone(),
+            title: input.title.clone(),
+            notes: String::new(),
+            done: false,
+            list_id,
+            list_name: project.clone(),
+            list_color,
+            due_day: None,
+            completed_at: None,
+            completed_day: None,
+        });
+        self.pending_adds.push_back(PendingAdd { temp_id, text });
+        self.sort_tasks();
         self.add_task.replace_text("");
         self.task_error = None;
         self.pending.push_back(Action::CreateTask {
@@ -967,6 +1044,9 @@ impl State {
 
     /// Click the title: rename it in place, with the caret where it belongs.
     pub fn begin_edit(&mut self, id: &str) {
+        if self.is_pending_add(id) {
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == id) else {
             return;
         };
@@ -984,6 +1064,9 @@ impl State {
         let Some(edit) = self.task_edit.take() else {
             return;
         };
+        if self.is_pending_add(&edit.id) {
+            return;
+        }
         let title = edit.edit.text.trim().to_owned();
         let Some(task) = self.tasks.iter().find(|task| task.id == edit.id) else {
             return;
@@ -1021,12 +1104,15 @@ impl State {
 
     /// `Save note` under an expanded row.
     pub fn save_task_note(&mut self) {
-        let Some(note) = &mut self.task_note else {
-            return;
+        let note_id = match &self.task_note {
+            Some(note) if self.is_pending_add(&note.id) => return,
+            Some(note) => note.id.clone(),
+            None => return,
         };
+        let note = self.task_note.as_mut().expect("checked above");
         note.saving = true;
         self.pending.push_back(Action::SetTaskNotes {
-            id: note.id.clone(),
+            id: note_id,
             notes: note.edit.text.clone(),
         });
     }
@@ -1034,6 +1120,9 @@ impl State {
     /// Check a task. Completing shows the eight-second way back; reopening is
     /// immediate.
     pub fn toggle_task(&mut self, id: &str) {
+        if self.is_pending_add(id) {
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
             return;
         };
@@ -1060,6 +1149,9 @@ impl State {
     /// Delete a task. There is no dialog: the row is soft-deleted, and the toast
     /// puts the same row back.
     pub fn delete_task(&mut self, id: &str) {
+        if self.is_pending_add(id) {
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
             return;
         };
@@ -1093,6 +1185,9 @@ impl State {
 
     /// The due buttons under an expanded row. `Some(day)` sets, `None` clears.
     pub fn set_due(&mut self, id: &str, due_day: Option<String>) {
+        if self.is_pending_add(id) {
+            return;
+        }
         self.task_error = None;
         self.pending.push_back(Action::SetTaskDue {
             id: id.to_owned(),
@@ -1102,6 +1197,9 @@ impl State {
 
     /// Move a task to a project, or to no project.
     pub fn set_project(&mut self, id: &str, list_id: Option<String>) {
+        if self.is_pending_add(id) {
+            return;
+        }
         self.task_error = None;
         self.pending.push_back(Action::SetTaskProject {
             id: id.to_owned(),
@@ -1577,6 +1675,31 @@ impl State {
             (Some(wait), None) | (None, Some(wait)) => Some(wait),
             (None, None) => None,
         }
+    }
+
+    /// Ask for the next frame as soon as the loop can give one.
+    ///
+    /// `poll` sends what the handlers queued, and it runs at the *start* of a
+    /// frame — before the handler that queues. So without this a command typed
+    /// in a field waits for the next pointer or key event to leave the app.
+    /// Called by every handler that can queue work.
+    pub fn flush(&mut self, tx: &mut Tx) {
+        if self.has_queued() {
+            tx.wake_after(std::time::Duration::ZERO);
+        }
+    }
+
+    /// Whether `take_action` has something to return on the next poll. The
+    /// autosave delay is not here: `next_wake` schedules that one itself.
+    fn has_queued(&self) -> bool {
+        !self.pending.is_empty()
+            || self.pending_open.is_some()
+            || self.pending_new
+            || self.pending_delete.is_some()
+            || self.save_requested
+            || self.update_requested
+            || self.release_requested.is_some()
+            || self.vault_intent.is_some()
     }
 
     /// The next command the app should send. Called from `poll` after `tick`.

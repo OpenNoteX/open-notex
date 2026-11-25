@@ -154,11 +154,12 @@ fn filters(s: &State, k: &Kit, layer: &mut Vec<El>) -> El {
                 MenuItem::new("Rename\u{2026}")
                     .on_select(move |s: &mut State| s.begin_project_edit(&rename)),
             )
-            .item(
-                MenuItem::new("Delete project")
-                    .danger(true)
-                    .on_select(move |s: &mut State| s.delete_project(&delete)),
-            )
+            .item(MenuItem::new("Delete project").danger(true).on_select_tx(
+                move |s: &mut State, tx| {
+                    s.delete_project(&delete);
+                    s.flush(tx);
+                },
+            ))
             .on_close(|s: &mut State| s.close_chip_menu())
             .open(open.is_some());
         if let Some(point) = open.as_ref().and_then(|menu| menu.point) {
@@ -179,7 +180,10 @@ fn filters(s: &State, k: &Kit, layer: &mut Vec<El>) -> El {
                 .caret(c.text_base, k.selection())
                 .placeholder("Project name".to_owned(), c.text_faint)
                 .on_edit(|s: &mut State| s.add_project.as_mut().unwrap())
-                .on_submit(|s: &mut State, _| s.commit_project())
+                .on_submit(|s: &mut State, tx| {
+                    s.commit_project();
+                    s.flush(tx);
+                })
                 .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
                     if ev.key == Key::Escape {
                         s.cancel_project();
@@ -294,7 +298,10 @@ fn rename_field(edit: &ProjectEdit, k: &Kit) -> El {
                 .color(k.c.text_base)
                 .caret(k.c.text_base, k.selection())
                 .on_edit(|s: &mut State| &mut s.project_edit.as_mut().unwrap().edit)
-                .on_submit(|s: &mut State, _| s.commit_project_edit())
+                .on_submit(|s: &mut State, tx| {
+                    s.commit_project_edit();
+                    s.flush(tx);
+                })
                 .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
                     if ev.key == Key::Escape {
                         s.cancel_project_edit();
@@ -365,7 +372,10 @@ fn add_row(s: &State, k: &Kit) -> El {
         .caret(c.text_base, k.selection())
         .placeholder("Add a task\u{2026}  #project".to_owned(), c.text_faint)
         .on_edit(|s: &mut State| &mut s.add_task)
-        .on_submit(|s: &mut State, _| s.add_task_now());
+        .on_submit(|s: &mut State, tx| {
+            s.add_task_now();
+            s.flush(tx);
+        });
     row()
         .key("task-add")
         .w_full()
@@ -485,7 +495,10 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
             Checkbox::new(task.done)
                 .label(format!("Mark \u{201c}{}\u{201d} done", task.title))
                 .hide_label()
-                .on_toggle(move |s: &mut State| s.toggle_task(&check))
+                .on_toggle_tx(move |s: &mut State, tx| {
+                    s.toggle_task(&check);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("task-check-{}", task.id)),
         );
@@ -503,7 +516,10 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
                 .color(c.text_base)
                 .caret(c.text_base, k.selection())
                 .on_edit(|s: &mut State| &mut s.task_edit.as_mut().unwrap().edit)
-                .on_submit(|s: &mut State, _| s.commit_edit())
+                .on_submit(|s: &mut State, tx| {
+                    s.commit_edit();
+                    s.flush(tx);
+                })
                 .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
                     if ev.key == Key::Escape {
                         s.cancel_edit();
@@ -607,7 +623,10 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
                 .variant(IconButtonVariant::GhostMuted)
                 .control_size(ControlSize::Small)
                 .label("Delete task")
-                .on_press(move |s: &mut State| s.delete_task(&remove))
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.delete_task(&remove);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("task-delete-{}", task.id)),
         );
@@ -650,7 +669,10 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
             Button::new(label)
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
-                .on_press(move |s: &mut State| s.set_due(&id, Some(day.clone())))
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.set_due(&id, Some(day.clone()));
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("task-due-{}-{}", days, task.id)),
         );
@@ -661,7 +683,10 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
             Button::new("Clear")
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
-                .on_press(move |s: &mut State| s.set_due(&id, None))
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.set_due(&id, None);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("task-due-clear-{}", task.id)),
         );
@@ -686,7 +711,10 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
                 ButtonVariant::Ghost
             })
             .control_size(ControlSize::Small)
-            .on_press(move |s: &mut State| s.set_project(&all, None))
+            .on_press_tx(move |s: &mut State, tx| {
+                s.set_project(&all, None);
+                s.flush(tx);
+            })
             .build(k)
             .key(format!("task-project-none-{}", task.id)),
     );
@@ -701,7 +729,10 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
                     ButtonVariant::Ghost
                 })
                 .control_size(ControlSize::Small)
-                .on_press(move |s: &mut State| s.set_project(&id, Some(list.clone())))
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.set_project(&id, Some(list.clone()));
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("task-project-{}-{}", project.id, task.id)),
         );
@@ -758,7 +789,10 @@ fn notes_actions(task: &TaskRow, note: &crate::state::TaskNote, k: &Kit) -> Opti
                 Button::new("Save note")
                     .variant(ButtonVariant::Outline)
                     .control_size(ControlSize::Small)
-                    .on_press(|s: &mut State| s.save_task_note())
+                    .on_press_tx(|s: &mut State, tx| {
+                        s.save_task_note();
+                        s.flush(tx);
+                    })
                     .build(k)
                     .key(format!("task-notes-save-{}", task.id)),
             ),
@@ -852,7 +886,10 @@ fn archive_row(task: &TaskRow, k: &Kit) -> El {
             Checkbox::new(true)
                 .label(format!("Reopen \u{201c}{}\u{201d}", task.title))
                 .hide_label()
-                .on_toggle(move |s: &mut State| s.toggle_task(&check))
+                .on_toggle_tx(move |s: &mut State, tx| {
+                    s.toggle_task(&check);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("archive-check-{}", task.id)),
         )
@@ -869,7 +906,10 @@ fn archive_row(task: &TaskRow, k: &Kit) -> El {
                 .variant(IconButtonVariant::GhostMuted)
                 .control_size(ControlSize::Small)
                 .label("Reopen task")
-                .on_press(move |s: &mut State| s.toggle_task(&restore))
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.toggle_task(&restore);
+                    s.flush(tx);
+                })
                 .build(k)
                 .key(format!("archive-restore-{}", task.id)),
         )
@@ -881,7 +921,10 @@ pub fn undo_toast(s: &State, k: &Kit) -> Option<El> {
     let undo = s.undo.as_ref()?;
     let toast = Toast::new("task-undo", undo.message().to_owned())
         .description(undo.detail())
-        .action(k, "Undo", false, |s: &mut State, _| s.undo_task())
+        .action(k, "Undo", false, |s: &mut State, tx| {
+            s.undo_task();
+            s.flush(tx);
+        })
         .on_close(|s: &mut State| s.dismiss_undo())
         .build(k);
     Some(ToastRegion::new().toast(toast).build(k))

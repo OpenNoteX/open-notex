@@ -209,3 +209,29 @@ rename or a restore that would collide is a typed refusal, never two `Launch`
 chips. A delete is therefore one press behind the usual eight-second toast: the
 blast radius is a label, not data. *Reopen when* projects gain colour choices or
 merging: those change a project's identity, not a task's filing.
+
+## 0020 — A queued action asks for its own frame; a new task shows before the store answers
+
+`poll` runs at the start of a frame and sends what `take_action` returns; the
+key and pointer handlers that queue those actions run after it. Rune cannot tell
+the app that input is still waiting (`Tx::input_waiting` is crate-private), so a
+command that only queued from a handler waited for the next event: pressing
+Return in the add row drew the row but did not write it until the next click or
+keypress. Every handler that can queue work now calls `State::flush(tx)`, which
+asks for a zero-delay wake when something is queued. The command leaves in the
+frame it was asked for, and the app still sleeps when it has nothing to do.
+
+The row itself is optimistic for the same reason: a person judges "did that
+work?" from the checklist, not from the store. `add_task_now` puts the parsed
+title in the list under a temporary id (`new-N`) and remembers the typed line.
+The store's `TaskChanged` for that create replaces the row in place, so the
+checklist never shows it twice, and the typed line is kept only until then. A
+refusal (`Evt::TaskCreateFailed`, separate from `TaskFailed` so the UI can tell
+which request failed) takes the row away and puts the whole line back in the
+field, `#project` and all. A row the store has not answered refuses checkbox,
+title, notes, due and project writes: its temporary id must never reach the
+database. Create events arrive in the order the commands were queued, so the
+oldest unanswered create owns the next unknown id. *Reopen when* actions can
+come from outside the window (a menu bar item, a notification): those need the
+same wake, and the store should then echo the caller's tag instead of relying on
+order.

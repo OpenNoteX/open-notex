@@ -87,7 +87,12 @@ assert!(rt.state.tasks[0].done);
   Recent notes is ordered by file mtime; the sidebar counts open tasks and has
   no Inbox/Today/Upcoming/Projects row. The checklist groups `Overdue / Today /
   Upcoming / No date`, the chips filter and add into the project they show,
-  `Return` in the add row asks for a task and keeps the field, clicking a title
+  `Return` in the add row asks for a task and keeps the field, and the row it
+  asked for is in the checklist before the store answers (its checkbox is inert
+  until the real id arrives); a `TaskChanged` for that create replaces the
+  temporary row in place, a refusal takes it away and puts the whole line back,
+  and Return and a checkbox press each ask for the next frame (`wake_deadline`
+  is due now, not at the next input event). Clicking a title
   renames in place (Escape cancels), completing shows the undo toast and its
   Undo reopens the task, the eight-second expiry is counted on the virtual
   clock, deleting is one press and a restore, the expanded row sets a due day
@@ -121,7 +126,9 @@ assert!(rt.state.tasks[0].done);
   another program reaches the open editor and the list while the app runs, with
   no command from the test: the worker's timer is what notices.
 - `apps/open-notex/tests/tasks.rs` covers tasks through the real worker and
-  database: a line in the add row becomes a row and a project; `#Launch` and
+  database: a line typed in the add row is a row on screen, with a frame already
+  asked for, before the worker answers (and the real id replaces it without a
+  duplicate); a line in the add row becomes a row and a project; `#Launch` and
   `#launch` are one project; a due day is written as a local date and its group
   follows it; completing moves the task to the archive and a second launch on
   the same database reads it back as done; a delete and its undo restore the

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use notex_store::Notify;
 use notex_ui::{Load, Route, State, view};
 use open_notex::{Session, pump, start};
-use rune::{Env, Runtime};
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const SIZE: (f32, f32) = (1120.0, 740.0);
 const TODAY: &str = "2026-11-19";
@@ -94,16 +94,78 @@ fn open_tasks() -> (Runtime<State>, Session, tempfile::TempDir) {
     (rt, session, dir)
 }
 
-fn add_line(rt: &mut Runtime<State>, text: &str) {
+/// Type a line and wait for the store's answer. The row is on screen before it,
+/// and `pending_adds` empties when the real id has replaced it, so this leaves
+/// the test with a settled checklist and a real id to act on.
+fn add_line(rt: &mut Runtime<State>, session: &Session, text: &str) {
     rt.state.add_task.replace_text(text);
     rt.state.add_task_now();
+    settle(rt, session, "the created task", |state| {
+        state.pending_adds.is_empty()
+    });
+}
+
+#[test]
+fn a_typed_line_is_a_row_before_the_worker_answers() {
+    let (mut rt, session, _dir) = open_tasks();
+    settle_layout(&mut rt);
+
+    click(&mut rt, "task-add-input");
+    rt.paste("Send invites");
+    rt.frame(1.0 / 60.0);
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    rt.frame(1.0 / 60.0);
+
+    // Nothing has been pumped: the row and the wake are the app's own answer.
+    assert!(
+        rt.state.pending_adds.len() == 1,
+        "the create is on its way to the worker"
+    );
+    assert_eq!(
+        rt.state
+            .pending_adds
+            .front()
+            .map(|add| add.temp_id.as_str()),
+        Some("new-0")
+    );
+    assert!(
+        rt.find("task-row-new-0").is_some(),
+        "the typed task is on screen before the store answers"
+    );
+    let deadline = rt
+        .wake_deadline()
+        .expect("the queued create asks for a frame");
+    assert!(
+        deadline <= rt.clock,
+        "the wake is due now, not at {deadline} with the clock at {}",
+        rt.clock
+    );
+
+    settle(&mut rt, &session, "the created task", |state| {
+        state.tasks.len() == 1 && state.pending_adds.is_empty()
+    });
+
+    let task = &rt.state.tasks[0];
+    assert_eq!(task.title, "Send invites");
+    assert!(
+        !task.id.starts_with("new-"),
+        "the real id replaced the temporary one"
+    );
+    assert!(rt.find(&format!("task-row-{}", task.id)).is_some());
+    assert!(
+        rt.find("task-row-new-0").is_none(),
+        "the optimistic row did not stay behind"
+    );
 }
 
 #[test]
 fn a_line_in_the_add_row_becomes_a_row_in_the_checklist() {
     let (mut rt, session, _dir) = open_tasks();
 
-    add_line(&mut rt, "Send invites #Launch");
+    add_line(&mut rt, &session, "Send invites #Launch");
     settle(&mut rt, &session, "the new task", |state| {
         !state.tasks.is_empty()
     });
@@ -130,11 +192,11 @@ fn a_line_in_the_add_row_becomes_a_row_in_the_checklist() {
 fn a_second_line_for_the_same_project_reuses_it() {
     let (mut rt, session, _dir) = open_tasks();
 
-    add_line(&mut rt, "Send invites #Launch");
+    add_line(&mut rt, &session, "Send invites #Launch");
     settle(&mut rt, &session, "the first task", |state| {
         state.tasks.len() == 1
     });
-    add_line(&mut rt, "Book the room #launch");
+    add_line(&mut rt, &session, "Book the room #launch");
     settle(&mut rt, &session, "the second task", |state| {
         state.tasks.len() == 2
     });
@@ -148,7 +210,7 @@ fn a_second_line_for_the_same_project_reuses_it() {
 #[test]
 fn a_due_day_is_a_local_date_and_the_group_follows_it() {
     let (mut rt, session, _dir) = open_tasks();
-    add_line(&mut rt, "Send invites");
+    add_line(&mut rt, &session, "Send invites");
     settle(&mut rt, &session, "the task", |state| {
         state.tasks.len() == 1
     });
@@ -183,7 +245,7 @@ fn a_due_day_is_a_local_date_and_the_group_follows_it() {
 fn completing_a_task_moves_it_to_the_archive_and_a_restart_agrees() {
     let dir = {
         let (mut rt, session, dir) = open_tasks();
-        add_line(&mut rt, "Send invites");
+        add_line(&mut rt, &session, "Send invites");
         settle(&mut rt, &session, "the task", |state| {
             state.tasks.len() == 1
         });
@@ -228,8 +290,8 @@ fn completing_a_task_moves_it_to_the_archive_and_a_restart_agrees() {
 #[test]
 fn a_deleted_task_returns_when_the_toast_is_used_and_stays_gone_when_it_is_not() {
     let (mut rt, session, _dir) = open_tasks();
-    add_line(&mut rt, "Send invites");
-    add_line(&mut rt, "Book the room");
+    add_line(&mut rt, &session, "Send invites");
+    add_line(&mut rt, &session, "Book the room");
     settle(&mut rt, &session, "two tasks", |state| {
         state.tasks.len() == 2
     });
@@ -259,7 +321,7 @@ fn a_deleted_task_returns_when_the_toast_is_used_and_stays_gone_when_it_is_not()
 #[test]
 fn renaming_and_moving_a_task_both_survive_a_relist() {
     let (mut rt, session, _dir) = open_tasks();
-    add_line(&mut rt, "Send invites #Launch");
+    add_line(&mut rt, &session, "Send invites #Launch");
     settle(&mut rt, &session, "the task", |state| {
         state.tasks.len() == 1
     });
@@ -291,7 +353,7 @@ fn renaming_and_moving_a_task_both_survive_a_relist() {
 #[test]
 fn a_task_note_is_saved_and_comes_back_on_the_next_open() {
     let (mut rt, session, _dir) = open_tasks();
-    add_line(&mut rt, "Send invites");
+    add_line(&mut rt, &session, "Send invites");
     settle(&mut rt, &session, "the task", |state| {
         state.tasks.len() == 1
     });
@@ -322,7 +384,7 @@ fn a_task_note_is_saved_and_comes_back_on_the_next_open() {
 #[test]
 fn a_renamed_project_renames_its_tasks_filing_and_a_delete_keeps_the_tasks() {
     let (mut rt, session, _dir) = open_tasks();
-    add_line(&mut rt, "Send invites #Launch");
+    add_line(&mut rt, &session, "Send invites #Launch");
     settle(&mut rt, &session, "the task", |state| {
         state.tasks.len() == 1
     });

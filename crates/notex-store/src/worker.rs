@@ -194,6 +194,12 @@ pub enum Evt {
     TaskFailed {
         err: String,
     },
+    /// A `CreateTask` was refused. Separate from [`Evt::TaskFailed`] because the
+    /// add row is showing that task before the answer: the UI must know which
+    /// request failed to take the optimistic row away and give the line back.
+    TaskCreateFailed {
+        err: String,
+    },
     Opened {
         id: String,
         body: String,
@@ -486,7 +492,7 @@ fn execute(
                 events.push(Evt::TaskChanged(created.task));
                 events
             }
-            Err(error) => vec![Evt::TaskFailed {
+            Err(error) => vec![Evt::TaskCreateFailed {
                 err: error.to_string(),
             }],
         },
