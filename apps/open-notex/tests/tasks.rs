@@ -428,3 +428,122 @@ fn a_renamed_project_renames_its_tasks_filing_and_a_delete_keeps_the_tasks() {
     assert_eq!(rt.state.projects[0].name, "Launch party");
     assert_eq!(rt.state.tasks[0].list_id.as_deref(), Some(project.as_str()));
 }
+
+/// Type a step into the expanded row and wait for the store's row, so the test
+/// holds a real id.
+fn add_step(rt: &mut Runtime<State>, session: &Session, parent: &str, title: &str) -> String {
+    rt.state.begin_step(parent);
+    rt.state
+        .step_input
+        .as_mut()
+        .unwrap()
+        .edit
+        .replace_text(title);
+    rt.state.add_step_now();
+    settle(rt, session, "the created step", |state| {
+        state.pending_adds.is_empty() && state.steps_of(parent).len() == 1
+    });
+    rt.state.steps_of(parent)[0].id.clone()
+}
+
+#[test]
+fn a_step_is_saved_under_its_task_and_a_restart_shows_it() {
+    let dir = {
+        let (mut rt, session, dir) = open_tasks();
+        add_line(&mut rt, &session, "Ship the release #Launch");
+        settle(&mut rt, &session, "the task", |state| {
+            state.tasks.len() == 1
+        });
+        let parent = rt.state.tasks[0].id.clone();
+        let project = rt.state.tasks[0].list_id.clone();
+
+        let step = add_step(&mut rt, &session, &parent, "Write the notes");
+        let row = rt
+            .state
+            .tasks
+            .iter()
+            .find(|task| task.id == step)
+            .expect("the step row");
+        assert_eq!(row.parent_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(row.list_id, project, "a step is filed with its task");
+        assert_eq!(row.due_day, None);
+        assert_eq!(
+            rt.state.open_task_count(),
+            1,
+            "a step is not a task of its own"
+        );
+
+        // The expanded row shows it, with its count.
+        rt.state.toggle_expanded(&parent);
+        rt.invalidate();
+        settle_layout(&mut rt);
+        assert!(rt.find(&format!("task-step-{step}")).is_some());
+        assert!(all_text(&rt).contains("Write the notes"));
+
+        // Completing the task closes the step in the same write, on screen.
+        rt.state.toggle_task(&parent);
+        settle(&mut rt, &session, "the completion", |state| {
+            state.tasks.iter().all(|task| task.done)
+        });
+        assert_eq!(rt.state.open_steps_of(&parent), 0);
+
+        // Undo takes the whole check back: the task and the step it closed.
+        rt.state.undo_task();
+        settle(&mut rt, &session, "the undo", |state| {
+            state.tasks.iter().all(|task| !task.done)
+        });
+        assert_eq!(rt.state.open_steps_of(&parent), 1);
+        dir
+    };
+
+    // A second launch, same database: the step is still under its task.
+    let vault = dir.path().join("vault");
+    let db = dir.path().join("notex.db");
+    let mut state = State::with_vault(vault.display().to_string());
+    state.route = Route::Tasks;
+    let session = start(&mut state, &vault, &db, Quiet).expect("the store starts again");
+    let mut rt = runtime(state);
+    settle(&mut rt, &session, "the reloaded tasks", |state| {
+        state.tasks.len() == 2
+    });
+    let parent = rt
+        .state
+        .tasks
+        .iter()
+        .find(|task| task.parent_id.is_none())
+        .expect("the task");
+    let steps = rt.state.steps_of(&parent.id);
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].title, "Write the notes");
+    assert_eq!(rt.state.open_task_count(), 1);
+}
+
+#[test]
+fn deleting_a_task_takes_its_steps_and_undo_brings_them_back() {
+    let (mut rt, session, _dir) = open_tasks();
+    add_line(&mut rt, &session, "Ship the release");
+    settle(&mut rt, &session, "the task", |state| {
+        state.tasks.len() == 1
+    });
+    let parent = rt.state.tasks[0].id.clone();
+    let step = add_step(&mut rt, &session, &parent, "Write the notes");
+
+    rt.state.delete_task(&parent);
+    settle(&mut rt, &session, "the delete", |state| {
+        state.tasks.is_empty()
+    });
+
+    rt.state.undo_task();
+    settle(&mut rt, &session, "the restore", |state| {
+        state.tasks.len() == 2
+    });
+    assert_eq!(
+        rt.state
+            .steps_of(&parent)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>(),
+        [step],
+        "undo puts the step back under its task"
+    );
+}

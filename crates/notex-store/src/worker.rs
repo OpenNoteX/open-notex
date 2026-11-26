@@ -93,6 +93,11 @@ pub enum Cmd {
         id: String,
         done: bool,
     },
+    /// Add a step under a task. The step inherits the parent's project.
+    CreateSubtask {
+        parent_id: String,
+        title: String,
+    },
     DeleteTask {
         id: String,
     },
@@ -194,9 +199,9 @@ pub enum Evt {
     TaskFailed {
         err: String,
     },
-    /// A `CreateTask` was refused. Separate from [`Evt::TaskFailed`] because the
-    /// add row is showing that task before the answer: the UI must know which
-    /// request failed to take the optimistic row away and give the line back.
+    /// A create the UI was already showing was refused: a task in the add row,
+    /// or a step under its task. Separate from [`Evt::TaskFailed`] because the
+    /// UI must take the optimistic row away and give the typed line back.
     TaskCreateFailed {
         err: String,
     },
@@ -533,21 +538,42 @@ fn execute(
             }
         }
         Cmd::SetTaskDone { id, done } => match tasks::set_done(conn, &id, done, now_ms(), device) {
-            Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+            // The steps a completion closed come back as their own changes, so
+            // the checklist updates every row without a reload.
+            Ok(Some(done)) => std::iter::once(Evt::TaskChanged(done.task))
+                .chain(done.closed_steps.into_iter().map(Evt::TaskChanged))
+                .collect(),
             Ok(None) => vec![Evt::TaskGone { id }],
             Err(error) => vec![Evt::TaskFailed {
                 err: error.to_string(),
             }],
         },
+        Cmd::CreateSubtask { parent_id, title } => {
+            match tasks::create_subtask(conn, &parent_id, &title, now_ms(), device) {
+                Ok(step) => vec![Evt::TaskChanged(step)],
+                // The step is on screen already: the refusal has to take that
+                // row away and give the line back, as a refused task does.
+                Err(error) => vec![Evt::TaskCreateFailed {
+                    err: error.to_string(),
+                }],
+            }
+        }
         Cmd::DeleteTask { id } => match tasks::delete(conn, &id, now_ms(), device) {
+            // A task and its steps go together; each row is told, so no step is
+            // left on screen under a task that is gone.
+            Ok(Some(ids)) => ids.into_iter().map(|id| Evt::TaskGone { id }).collect(),
             // Already gone is the same answer as deleted: drop the row.
-            Ok(_) => vec![Evt::TaskGone { id }],
+            Ok(None) => vec![Evt::TaskGone { id }],
             Err(error) => vec![Evt::TaskFailed {
                 err: error.to_string(),
             }],
         },
         Cmd::RestoreTask { id } => match tasks::restore(conn, &id, now_ms(), device) {
-            Ok(Some(task)) => vec![Evt::TaskChanged(task)],
+            // The steps that delete took come back with the row, each as its
+            // own change, so undo puts the whole task on screen.
+            Ok(Some(restored)) => std::iter::once(Evt::TaskChanged(restored.task))
+                .chain(restored.steps.into_iter().map(Evt::TaskChanged))
+                .collect(),
             Ok(None) => vec![Evt::TaskFailed {
                 err: "That task could not be restored.".to_owned(),
             }],

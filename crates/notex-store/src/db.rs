@@ -47,6 +47,14 @@ pub enum StoreError {
     DuplicateList(String),
     #[error("a project needs a name")]
     EmptyListName,
+    #[error("a step needs a title")]
+    EmptyStepTitle,
+    #[error("a step cannot have steps of its own")]
+    NestedStep,
+    #[error("a finished task cannot take a new step")]
+    TaskIsDone,
+    #[error("that task is gone")]
+    MissingTask,
 }
 
 /// Open a database, apply pragmas and run migrations.

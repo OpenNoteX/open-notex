@@ -34,6 +34,15 @@ pub enum Load {
 /// How long the undo toast holds a completed or deleted task.
 pub const UNDO_SECONDS: f64 = 8.0;
 
+/// Where a typed line goes back to when the store refuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddTarget {
+    /// The add row at the top of Tasks.
+    Main,
+    /// The add-step field under this task.
+    Step(String),
+}
+
 /// A task typed in the add row that the store has not answered yet. The row is
 /// already in the checklist under `temp_id`; the answer replaces it in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +51,14 @@ pub struct PendingAdd {
     pub temp_id: String,
     /// The line exactly as typed, so a refusal can put it back in the field.
     pub text: String,
+    /// Which field the line came from.
+    pub target: AddTarget,
+}
+
+/// The add-step field under one expanded task.
+pub struct StepInput {
+    pub parent_id: String,
+    pub edit: TextEdit,
 }
 
 /// A row in the notes list. The body is not here: it is read on demand, so a long
@@ -98,6 +115,10 @@ pub struct TaskRow {
     pub completed_at: Option<i64>,
     /// The local day `completed_at` falls on, for the archive's groups.
     pub completed_day: Option<String>,
+    /// The task this is a step of. A step is an ordinary task row: it has the
+    /// same title, notes and done flag, and it only differs in where the
+    /// checklist puts it.
+    pub parent_id: Option<String>,
 }
 
 impl TaskRow {
@@ -106,6 +127,12 @@ impl TaskRow {
         self.due_day
             .as_deref()
             .map(|day| checklist::due(day, today))
+    }
+
+    /// A step is a task with a parent, so the checklist hides it from the top
+    /// level and the counts.
+    pub fn is_step(&self) -> bool {
+        self.parent_id.is_some()
     }
 }
 
@@ -150,6 +177,9 @@ pub enum Undo {
     Task {
         id: String,
         done: bool,
+        /// The steps this completion closed. Undo reopens them, so a check that
+        /// took three steps back takes them back too.
+        steps: Vec<String>,
         message: String,
         /// Seconds left. `tick` counts this down and drops the toast at zero.
         left: f64,
@@ -342,6 +372,11 @@ pub enum Action {
         id: String,
         done: bool,
     },
+    /// Add a step under a task; the step inherits the task's project.
+    CreateSubtask {
+        parent_id: String,
+        title: String,
+    },
     /// Soft delete; the undo toast puts the same row back.
     DeleteTask(String),
     RestoreTask(String),
@@ -512,6 +547,8 @@ pub struct State {
     pub task_edit: Option<TaskEdit>,
     /// The expanded row's notes field.
     pub task_note: Option<TaskNote>,
+    /// The add-step field under one expanded task.
+    pub step_input: Option<StepInput>,
     /// The row whose notes and dates are open under it.
     pub expanded: Option<String>,
     /// The archive is showing done tasks instead of the checklist.
@@ -593,6 +630,7 @@ impl State {
             project_edit: None,
             task_edit: None,
             task_note: None,
+            step_input: None,
             expanded: None,
             archive: false,
             undo: None,
@@ -710,11 +748,18 @@ impl State {
     }
 
     /// The store refused a new task. Its row goes and the line comes back to
-    /// the field, so nothing typed has to be typed again.
+    /// the field it was typed in, so nothing typed has to be typed again.
     pub fn add_failed(&mut self, error: impl Into<String>) {
         if let Some(pending) = self.pending_adds.pop_front() {
             self.tasks.retain(|task| task.id != pending.temp_id);
-            self.add_task.replace_text(pending.text);
+            match pending.target {
+                AddTarget::Main => self.add_task.replace_text(pending.text),
+                AddTarget::Step(parent_id) => {
+                    let mut edit = TextEdit::new(pending.text);
+                    edit.focused = true;
+                    self.step_input = Some(StepInput { parent_id, edit });
+                }
+            }
             self.prune_task_editors();
         }
         self.task_error = Some(error.into());
@@ -759,9 +804,12 @@ impl State {
         self.task_error = Some(error.into());
     }
 
-    /// Open tasks, in store order.
+    /// Open tasks, in store order. Steps are not top-level tasks: they show
+    /// under the row they belong to.
     pub fn open_tasks(&self) -> impl Iterator<Item = &TaskRow> {
-        self.tasks.iter().filter(|task| !task.done)
+        self.tasks
+            .iter()
+            .filter(|task| !task.done && !task.is_step())
     }
 
     pub fn open_task_count(&self) -> usize {
@@ -769,7 +817,26 @@ impl State {
     }
 
     pub fn done_task_count(&self) -> usize {
-        self.tasks.iter().filter(|task| task.done).count()
+        self.tasks
+            .iter()
+            .filter(|task| task.done && !task.is_step())
+            .count()
+    }
+
+    /// The steps of one task, in the order they were added.
+    pub fn steps_of(&self, parent_id: &str) -> Vec<&TaskRow> {
+        self.tasks
+            .iter()
+            .filter(|task| task.parent_id.as_deref() == Some(parent_id))
+            .collect()
+    }
+
+    /// How many of a task's steps are still open, for the row's `2 of 3` line.
+    pub fn open_steps_of(&self, parent_id: &str) -> usize {
+        self.steps_of(parent_id)
+            .into_iter()
+            .filter(|step| !step.done)
+            .count()
     }
 
     /// The checklist after the project chip: open tasks only.
@@ -793,7 +860,11 @@ impl State {
 
     /// Done tasks, newest first, for the archive.
     pub fn archived(&self) -> Vec<&TaskRow> {
-        let mut done: Vec<&TaskRow> = self.tasks.iter().filter(|task| task.done).collect();
+        let mut done: Vec<&TaskRow> = self
+            .tasks
+            .iter()
+            .filter(|task| task.done && !task.is_step())
+            .collect();
         done.sort_by(|a, b| {
             b.completed_at
                 .cmp(&a.completed_at)
@@ -858,8 +929,13 @@ impl State {
             due_day: None,
             completed_at: None,
             completed_day: None,
+            parent_id: None,
         });
-        self.pending_adds.push_back(PendingAdd { temp_id, text });
+        self.pending_adds.push_back(PendingAdd {
+            temp_id,
+            text,
+            target: AddTarget::Main,
+        });
         self.sort_tasks();
         self.add_task.replace_text("");
         self.task_error = None;
@@ -868,6 +944,77 @@ impl State {
             project,
             due_day: None,
         });
+    }
+
+    /// Open the add-step field under one task. Only one field is open at a
+    /// time, so two rows never fight for the keyboard.
+    pub fn begin_step(&mut self, parent_id: &str) {
+        if self.is_pending_add(parent_id) {
+            return;
+        }
+        if self
+            .step_input
+            .as_ref()
+            .is_some_and(|step| step.parent_id == parent_id)
+        {
+            return;
+        }
+        let mut edit = TextEdit::new("");
+        edit.focused = true;
+        self.step_input = Some(StepInput {
+            parent_id: parent_id.to_owned(),
+            edit,
+        });
+    }
+
+    pub fn cancel_step(&mut self) {
+        self.step_input = None;
+    }
+
+    /// Return in a step's field. The step shows under its task at once, the
+    /// field stays open and empty, and the command is queued. A step takes no
+    /// project and no date: it belongs to its task.
+    pub fn add_step_now(&mut self) {
+        let Some(step) = &self.step_input else {
+            return;
+        };
+        let parent_id = step.parent_id.clone();
+        let title = step.edit.text.trim().to_owned();
+        if title.is_empty() {
+            return;
+        }
+        let Some(parent) = self.tasks.iter().find(|task| task.id == parent_id).cloned() else {
+            self.step_input = None;
+            return;
+        };
+        let temp_id = format!("new-{}", self.next_temp);
+        self.next_temp += 1;
+        self.tasks.push(TaskRow {
+            id: temp_id.clone(),
+            title: title.clone(),
+            notes: String::new(),
+            done: false,
+            // A step is filed with its task, so the chip and the filter agree.
+            list_id: parent.list_id.clone(),
+            list_name: parent.list_name.clone(),
+            list_color: parent.list_color.clone(),
+            due_day: None,
+            completed_at: None,
+            completed_day: None,
+            parent_id: Some(parent_id.clone()),
+        });
+        self.pending_adds.push_back(PendingAdd {
+            temp_id,
+            text: title.clone(),
+            target: AddTarget::Step(parent_id.clone()),
+        });
+        self.sort_tasks();
+        if let Some(step) = &mut self.step_input {
+            step.edit.replace_text("");
+        }
+        self.task_error = None;
+        self.pending
+            .push_back(Action::CreateSubtask { parent_id, title });
     }
 
     /// The `+ Project` chip: open its one-line field.
@@ -1088,9 +1235,24 @@ impl State {
         if self.expanded.as_deref() == Some(id) {
             self.expanded = None;
             self.task_note = None;
+            if self
+                .step_input
+                .as_ref()
+                .is_some_and(|step| step.parent_id == id)
+            {
+                self.step_input = None;
+            }
             return;
         }
         self.expanded = Some(id.to_owned());
+        // A field open under another row would follow the person here.
+        if self
+            .step_input
+            .as_ref()
+            .is_some_and(|step| step.parent_id != id)
+        {
+            self.step_input = None;
+        }
         self.task_note = self
             .tasks
             .iter()
@@ -1134,9 +1296,18 @@ impl State {
             });
             return;
         }
+        // Completing a task closes its open steps in the same write. The toast
+        // remembers them so undo takes the whole check back.
+        let steps: Vec<String> = self
+            .steps_of(id)
+            .into_iter()
+            .filter(|step| !step.done)
+            .map(|step| step.id.clone())
+            .collect();
         self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: true,
+            steps,
             message: format!("\u{201c}{}\u{201d} done", task.title),
             left: UNDO_SECONDS,
         });
@@ -1159,6 +1330,7 @@ impl State {
         self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: false,
+            steps: Vec::new(),
             message: format!("\u{201c}{}\u{201d} deleted", task.title),
             left: UNDO_SECONDS,
         });
@@ -1168,9 +1340,21 @@ impl State {
     /// The toast's Undo button.
     pub fn undo_task(&mut self) {
         match self.undo.take() {
-            Some(Undo::Task { id, done: true, .. }) => self
-                .pending
-                .push_back(Action::SetTaskDone { id, done: false }),
+            Some(Undo::Task {
+                id,
+                done: true,
+                steps,
+                ..
+            }) => {
+                self.pending
+                    .push_back(Action::SetTaskDone { id, done: false });
+                for step in steps {
+                    self.pending.push_back(Action::SetTaskDone {
+                        id: step,
+                        done: false,
+                    });
+                }
+            }
             Some(Undo::Task { id, .. }) => self.pending.push_back(Action::RestoreTask(id)),
             Some(Undo::Project { id, task_ids, .. }) => self
                 .pending
@@ -1201,6 +1385,21 @@ impl State {
             return;
         }
         self.task_error = None;
+        // A step is filed where its task is, and the store moves both in one
+        // write; the rows on screen follow now rather than a frame later.
+        let project = list_id.as_ref().and_then(|list| {
+            self.projects
+                .iter()
+                .find(|project| &project.id == list)
+                .map(|project| (project.name.clone(), project.color.clone()))
+        });
+        for task in &mut self.tasks {
+            if task.parent_id.as_deref() == Some(id) {
+                task.list_id = list_id.clone();
+                task.list_name = project.as_ref().map(|(name, _)| name.clone());
+                task.list_color = project.as_ref().and_then(|(_, color)| color.clone());
+            }
+        }
         self.pending.push_back(Action::SetTaskProject {
             id: id.to_owned(),
             list_id,
@@ -1229,10 +1428,21 @@ impl State {
             self.expanded = None;
             self.task_note = None;
         }
+        if let Some(step) = &self.step_input
+            && !self.tasks.iter().any(|task| task.id == step.parent_id)
+        {
+            self.step_input = None;
+        }
     }
 
     fn sort_tasks(&mut self) {
         self.tasks.sort_by(|a, b| {
+            // Steps keep the order they were added in. Their block's place is
+            // the parent's; sorting them by title would scramble a checklist
+            // someone wrote in an order.
+            if a.parent_id.is_some() && a.parent_id == b.parent_id {
+                return std::cmp::Ordering::Equal;
+            }
             a.done.cmp(&b.done).then_with(|| {
                 a.due_day
                     .is_none()
