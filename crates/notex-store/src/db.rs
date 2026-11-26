@@ -49,7 +49,7 @@ pub enum StoreError {
     EmptyListName,
     #[error("a step needs a title")]
     EmptyStepTitle,
-    #[error("a step cannot have steps of its own")]
+    #[error("a step tree stops at three levels")]
     NestedStep,
     #[error("a finished task cannot take a new step")]
     TaskIsDone,

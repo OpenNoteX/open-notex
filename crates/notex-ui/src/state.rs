@@ -55,7 +55,7 @@ pub struct PendingAdd {
     pub target: AddTarget,
 }
 
-/// The add-step field under one expanded task.
+/// The add-a-step field under one task in the tree.
 pub struct StepInput {
     pub parent_id: String,
     pub edit: TextEdit,
@@ -177,9 +177,9 @@ pub enum Undo {
     Task {
         id: String,
         done: bool,
-        /// The steps this completion closed. Undo reopens them, so a check that
-        /// took three steps back takes them back too.
-        steps: Vec<String>,
+        /// The steps this completion closed, at every depth. Undo reopens
+        /// them, so a check that took three steps back takes them back too.
+        closed: Vec<String>,
         message: String,
         /// Seconds left. `tick` counts this down and drops the toast at zero.
         left: f64,
@@ -719,11 +719,21 @@ impl State {
         {
             // The store's answer to a queued create: its row takes the optimistic
             // row's place, so the checklist never shows the same task twice.
+            let real_id = task.id.clone();
             match self.tasks.iter_mut().find(|row| row.id == pending.temp_id) {
                 Some(row) => *row = task,
                 // The row went away before its answer (a refusal, a race): the
                 // answer is still a real task, so it arrives.
                 None => self.tasks.push(task),
+            }
+            // A completion that ran before this answer may have put the
+            // temporary id in the toast. Undo has to name the real row.
+            if let Some(Undo::Task { closed, .. }) = &mut self.undo {
+                for id in closed.iter_mut() {
+                    if *id == pending.temp_id {
+                        *id = real_id.clone();
+                    }
+                }
             }
         } else if let Some(row) = self.tasks.iter_mut().find(|row| row.id == task.id) {
             *row = task;
@@ -829,6 +839,26 @@ impl State {
             .iter()
             .filter(|task| task.parent_id.as_deref() == Some(parent_id))
             .collect()
+    }
+
+    /// How many rows deep a task sits: a task is 1, its steps 2, their steps
+    /// 3. Walks `parent_id` so a step can hold steps up to
+    /// [`notex_core::MAX_TASK_DEPTH`], and stops if the data ever cycles.
+    pub fn depth_of(&self, id: &str) -> usize {
+        let mut depth = 0;
+        let mut cursor = Some(id.to_owned());
+        while let Some(current) = cursor {
+            depth += 1;
+            if depth > notex_core::MAX_TASK_DEPTH {
+                break;
+            }
+            cursor = self
+                .tasks
+                .iter()
+                .find(|task| task.id == current)
+                .and_then(|task| task.parent_id.clone());
+        }
+        depth
     }
 
     /// How many of a task's steps are still open, for the row's `2 of 3` line.
@@ -947,9 +977,13 @@ impl State {
     }
 
     /// Open the add-step field under one task. Only one field is open at a
-    /// time, so two rows never fight for the keyboard.
+    /// time, so two rows never fight for the keyboard, and a tree stops at
+    /// [`notex_core::MAX_TASK_DEPTH`] levels.
     pub fn begin_step(&mut self, parent_id: &str) {
         if self.is_pending_add(parent_id) {
+            return;
+        }
+        if self.depth_of(parent_id) >= notex_core::MAX_TASK_DEPTH {
             return;
         }
         if self
@@ -987,6 +1021,9 @@ impl State {
             self.step_input = None;
             return;
         };
+        if self.depth_of(&parent_id) >= notex_core::MAX_TASK_DEPTH {
+            return;
+        }
         let temp_id = format!("new-{}", self.next_temp);
         self.next_temp += 1;
         self.tasks.push(TaskRow {
@@ -1230,29 +1267,15 @@ impl State {
         self.task_edit = None;
     }
 
-    /// Open a row's notes and dates, or close them.
+    /// Open a row's notes and dates, or close them. The step field lives under
+    /// the row, not in these details, so it stays open either way.
     pub fn toggle_expanded(&mut self, id: &str) {
         if self.expanded.as_deref() == Some(id) {
             self.expanded = None;
             self.task_note = None;
-            if self
-                .step_input
-                .as_ref()
-                .is_some_and(|step| step.parent_id == id)
-            {
-                self.step_input = None;
-            }
             return;
         }
         self.expanded = Some(id.to_owned());
-        // A field open under another row would follow the person here.
-        if self
-            .step_input
-            .as_ref()
-            .is_some_and(|step| step.parent_id != id)
-        {
-            self.step_input = None;
-        }
         self.task_note = self
             .tasks
             .iter()
@@ -1296,18 +1319,22 @@ impl State {
             });
             return;
         }
-        // Completing a task closes its open steps in the same write. The toast
-        // remembers them so undo takes the whole check back.
-        let steps: Vec<String> = self
-            .steps_of(id)
-            .into_iter()
-            .filter(|step| !step.done)
-            .map(|step| step.id.clone())
-            .collect();
+        // Completing a task closes its open steps, and theirs, in the same
+        // write. The toast remembers them so undo takes the whole check back.
+        let mut closed = Vec::new();
+        let mut queue: VecDeque<String> = VecDeque::from([id.to_owned()]);
+        while let Some(parent) = queue.pop_front() {
+            for child in self.steps_of(&parent) {
+                if !child.done {
+                    closed.push(child.id.clone());
+                }
+                queue.push_back(child.id.clone());
+            }
+        }
         self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: true,
-            steps,
+            closed,
             message: format!("\u{201c}{}\u{201d} done", task.title),
             left: UNDO_SECONDS,
         });
@@ -1330,7 +1357,7 @@ impl State {
         self.undo = Some(Undo::Task {
             id: id.to_owned(),
             done: false,
-            steps: Vec::new(),
+            closed: Vec::new(),
             message: format!("\u{201c}{}\u{201d} deleted", task.title),
             left: UNDO_SECONDS,
         });
@@ -1343,12 +1370,12 @@ impl State {
             Some(Undo::Task {
                 id,
                 done: true,
-                steps,
+                closed,
                 ..
             }) => {
                 self.pending
                     .push_back(Action::SetTaskDone { id, done: false });
-                for step in steps {
+                for step in closed {
                     self.pending.push_back(Action::SetTaskDone {
                         id: step,
                         done: false,

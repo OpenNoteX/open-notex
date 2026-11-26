@@ -242,26 +242,33 @@ A step is a row in `tasks` with `parent_id` set, not a second table. It keeps th
 whole model it already has: title, notes, done, `completed_at`, `rev`, a soft
 delete and an oplog row for every write. A separate `steps` table would have had
 to duplicate all of that, and every query, export and future sync would need to
-know two shapes for "a thing you check off". One level only: a step cannot hold
-steps, and a finished task takes no new step.
+know two shapes for "a thing you check off". A tree stops at three levels — a
+task, its steps, and their steps (`notex_core::MAX_TASK_DEPTH`) — and a finished
+task takes no new step. Three is enough to say "break this down"; a fourth would
+need a tree view and a way to move a branch, which is a later milestone.
 
 A step is filed where its task is. `create_subtask` copies the task's project,
-and `set_list` moves the task's open steps in the same transaction, one oplog row
-each, so a project filter, an export and the join never disagree. A step never
-takes a due day of its own: it belongs to its task's day. The checklist leaves
-steps out of its top level, its open count and its archive, and draws them under
-the task instead; the collapsed row carries a `1/3` chip.
+and `set_list` moves every open row below the task in the same transaction, one
+oplog row each, so a project filter, an export and the join never disagree. A
+step never takes a due day of its own: it belongs to its task's day. The
+checklist leaves steps out of its top level, its open count and its archive, and
+draws them under the task instead, indented one level per step. A row that can
+still take a step carries a `+`; the last level has none, rather than one that
+refuses. There is no STEPS heading or panel: the steps are part of the
+checklist, visible whether or not the row's notes and dates are open. The row
+carries a `1/3` count of the steps below it.
 
-Checking a task checks its open steps: `set_done` reads the open step ids first,
-then closes the task and each step in one transaction. A step that was already
-done is left alone, so the write changes exactly what it reports. Reopening a
-task does **not** reopen its steps — a step someone finished stays finished —
-but the toast's Undo is not a plain reopen: the UI remembers which steps that
-check closed and asks to reopen each, so undo takes the whole check back.
-Deleting a task soft-deletes its steps in the same transaction and answers with
-every id, so no step is left on screen under a task that is gone. Undo restores
-the steps whose `deleted_at` equals the task's, which is the delete being undone;
-a step deleted on its own earlier keeps its own timestamp and stays gone.
+Checking a task checks every open step below it: `set_done` reads the open ids
+with a recursive query first, then closes the task and each step in one
+transaction. A step that was already done is left alone, so the write changes
+exactly what it reports. Reopening a task does **not** reopen its steps — a step
+someone finished stays finished — but the toast's Undo is not a plain reopen:
+the UI remembers every step that check closed and asks to reopen each, so undo
+takes the whole check back. Deleting a task soft-deletes the whole branch in the
+same transaction and answers with every id, so no step is left on screen under a
+task that is gone. Undo restores the steps whose `deleted_at` equals the task's,
+which is the delete being undone; a step deleted on its own earlier keeps its own
+timestamp and stays gone.
 
 The add-step field is optimistic and stays open, for the same reasons as the add
 row (0020): the step shows under its task in the frame Return is handled, and a

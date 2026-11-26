@@ -519,6 +519,66 @@ fn a_step_is_saved_under_its_task_and_a_restart_shows_it() {
 }
 
 #[test]
+fn a_step_of_a_step_is_saved_and_the_tree_stops_at_three_levels() {
+    let dir = {
+        let (mut rt, session, dir) = open_tasks();
+        add_line(&mut rt, &session, "Ship the release");
+        settle(&mut rt, &session, "the task", |state| {
+            state.tasks.len() == 1
+        });
+        let parent = rt.state.tasks[0].id.clone();
+        let step = add_step(&mut rt, &session, &parent, "Write the notes");
+        let leaf = add_step(&mut rt, &session, &step, "Open the draft");
+        assert_eq!(rt.state.depth_of(&leaf), 3);
+        assert_eq!(
+            rt.state.open_task_count(),
+            1,
+            "a step of a step is still not a task"
+        );
+        assert_eq!(
+            rt.state
+                .steps_of(&step)
+                .iter()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Open the draft"]
+        );
+
+        // The third level is the last one: no field opens under it.
+        rt.state.cancel_step();
+        rt.state.begin_step(&leaf);
+        assert!(rt.state.step_input.is_none());
+        dir
+    };
+
+    // A second launch reads the whole branch back from the database.
+    let vault = dir.path().join("vault");
+    let db = dir.path().join("notex.db");
+    let mut state = State::with_vault(vault.display().to_string());
+    state.route = Route::Tasks;
+    let session = start(&mut state, &vault, &db, Quiet).expect("the store starts again");
+    let mut rt = runtime(state);
+    settle(&mut rt, &session, "the reloaded tasks", |state| {
+        state.tasks.len() == 3
+    });
+    let parent = rt
+        .state
+        .tasks
+        .iter()
+        .find(|task| task.parent_id.is_none())
+        .expect("the task");
+    let step = rt.state.steps_of(&parent.id)[0].id.clone();
+    assert_eq!(
+        rt.state
+            .steps_of(&step)
+            .iter()
+            .map(|s| s.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Open the draft"]
+    );
+}
+
+#[test]
 fn deleting_a_task_takes_its_steps_and_undo_brings_them_back() {
     let (mut rt, session, _dir) = open_tasks();
     add_line(&mut rt, &session, "Ship the release");

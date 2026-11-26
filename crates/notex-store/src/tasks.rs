@@ -161,7 +161,8 @@ pub fn create(
 
 /// Add a step under a task. A step is an ordinary task row with `parent_id`
 /// set: it inherits the parent's project (so filtering and export agree) and
-/// has no due day of its own. One level only, and only under an open task.
+/// has no due day of its own. A tree stops at [`notex_core::MAX_TASK_DEPTH`]
+/// levels, and only an open task takes steps.
 pub fn create_subtask(
     conn: &mut Connection,
     parent_id: &str,
@@ -177,7 +178,7 @@ pub fn create_subtask(
     let Some(parent) = task(&tx, parent_id)? else {
         return Err(StoreError::MissingTask);
     };
-    if parent.parent_id.is_some() {
+    if depth_of(&tx, parent_id)? >= notex_core::MAX_TASK_DEPTH {
         return Err(StoreError::NestedStep);
     }
     if parent.done {
@@ -254,9 +255,15 @@ pub fn set_list(
     // in the same write, so a project filter and an export never disagree.
     let step_ids: Vec<String> = {
         let mut stmt = tx.prepare(
-            "SELECT id FROM tasks
-             WHERE parent_id = ?1 AND deleted_at IS NULL AND list_id IS NOT ?2
-             ORDER BY created_at, rowid",
+            "WITH RECURSIVE sub(id) AS (
+                 SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL
+                 UNION ALL
+                 SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id
+                 WHERE t.deleted_at IS NULL
+             )
+             SELECT sub.id FROM sub JOIN tasks t ON t.id = sub.id
+             WHERE t.list_id IS NOT ?2
+             ORDER BY t.created_at, t.rowid",
         )?;
         let rows = stmt.query_map(params![id, list_id], |row| row.get(0))?;
         rows.collect::<Result<_, _>>()?
@@ -317,7 +324,7 @@ pub fn set_due(
 
 /// Complete or reopen. Completing stamps `completed_at`; reopening clears it,
 /// so "how long did this take" is never mixed with "when was it last touched".
-/// Completing a task with steps closes its open steps in the same transaction,
+/// Completing a task closes every open step below it in the same transaction,
 /// one oplog row each; a step that was already done is left alone.
 pub fn set_done(
     conn: &mut Connection,
@@ -327,23 +334,30 @@ pub fn set_done(
     device_id: &str,
 ) -> Result<Option<Completion>, StoreError> {
     let tx = conn.transaction()?;
-    let Some(parent_id) = tx
+    if tx
         .query_row(
-            "SELECT parent_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
             [id],
-            |row| row.get::<_, Option<String>>(0),
+            |_| Ok(()),
         )
         .optional()?
-    else {
+        .is_none()
+    {
         return Ok(None);
-    };
+    }
     // The ids are read before the update, so only steps that were open at this
     // moment are closed by this completion.
-    let step_ids: Vec<String> = if done && parent_id.is_none() {
+    let step_ids: Vec<String> = if done {
         let mut stmt = tx.prepare(
-            "SELECT id FROM tasks
-             WHERE parent_id = ?1 AND deleted_at IS NULL AND status = 'open'
-             ORDER BY created_at, rowid",
+            "WITH RECURSIVE sub(id) AS (
+                 SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL
+                 UNION ALL
+                 SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id
+                 WHERE t.deleted_at IS NULL
+             )
+             SELECT sub.id FROM sub JOIN tasks t ON t.id = sub.id
+             WHERE t.status = 'open'
+             ORDER BY t.created_at, t.rowid",
         )?;
         let rows = stmt.query_map([id], |row| row.get(0))?;
         rows.collect::<Result<_, _>>()?
@@ -407,22 +421,28 @@ pub fn delete(
     device_id: &str,
 ) -> Result<Option<Vec<String>>, StoreError> {
     let tx = conn.transaction()?;
-    let Some(parent_id) = tx
+    if tx
         .query_row(
-            "SELECT parent_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT 1 FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
             [id],
-            |row| row.get::<_, Option<String>>(0),
+            |_| Ok(()),
         )
         .optional()?
-    else {
+        .is_none()
+    {
         return Ok(None);
-    };
+    }
     let mut ids = vec![id.to_owned()];
-    if parent_id.is_none() {
+    {
         let mut stmt = tx.prepare(
-            "SELECT id FROM tasks
-             WHERE parent_id = ?1 AND deleted_at IS NULL
-             ORDER BY created_at, rowid",
+            "WITH RECURSIVE sub(id) AS (
+                 SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL
+                 UNION ALL
+                 SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id
+                 WHERE t.deleted_at IS NULL
+             )
+             SELECT sub.id FROM sub JOIN tasks t ON t.id = sub.id
+             ORDER BY t.created_at, t.rowid",
         )?;
         let rows = stmt.query_map([id], |row| row.get(0))?;
         ids.extend(rows.collect::<Result<Vec<String>, _>>()?);
@@ -486,9 +506,14 @@ pub fn restore(
     let step_ids: Vec<String> = match deleted_at {
         Some(deleted_at) => {
             let mut stmt = tx.prepare(
-                "SELECT id FROM tasks
-                 WHERE parent_id = ?1 AND deleted_at = ?2
-                 ORDER BY created_at, rowid",
+                "WITH RECURSIVE sub(id) AS (
+                     SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at = ?2
+                     UNION ALL
+                     SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id
+                     WHERE t.deleted_at = ?2
+                 )
+                 SELECT sub.id FROM sub JOIN tasks t ON t.id = sub.id
+                 ORDER BY t.created_at, t.rowid",
             )?;
             let rows = stmt.query_map(params![id, deleted_at], |row| row.get(0))?;
             rows.collect::<Result<_, _>>()?
@@ -810,6 +835,29 @@ fn update(
     let task = task(&tx, id)?;
     tx.commit()?;
     Ok(task)
+}
+
+/// How many rows deep a task sits: a task is 1, its steps 2, their steps 3.
+/// The walk stops at [`notex_core::MAX_TASK_DEPTH`] + 1 so a corrupted cycle
+/// cannot hang the worker.
+fn depth_of(conn: &Connection, id: &str) -> Result<usize, StoreError> {
+    let mut depth = 0;
+    let mut cursor = Some(id.to_owned());
+    while let Some(current) = cursor {
+        depth += 1;
+        if depth > notex_core::MAX_TASK_DEPTH {
+            break;
+        }
+        cursor = conn
+            .query_row(
+                "SELECT parent_id FROM tasks WHERE id = ?1",
+                [&current],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    Ok(depth)
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -1250,15 +1298,16 @@ mod tests {
     }
 
     #[test]
-    fn a_step_cannot_hold_steps_and_a_done_task_takes_none() {
+    fn a_task_tree_stops_at_three_levels_and_a_done_task_takes_no_step() {
         let mut conn = db::open_in_memory().unwrap();
         let parent = create(&mut conn, "Ship", None, None, now(), "dev")
             .unwrap()
             .task;
         let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        let leaf = create_subtask(&mut conn, &step.id, "Open the draft", now(), "dev").unwrap();
 
         assert!(matches!(
-            create_subtask(&mut conn, &step.id, "Too deep", now(), "dev"),
+            create_subtask(&mut conn, &leaf.id, "Too deep", now(), "dev"),
             Err(StoreError::NestedStep)
         ));
         assert!(matches!(
@@ -1287,6 +1336,9 @@ mod tests {
         let second = create_subtask(&mut conn, &parent.id, "Test", now() + 1, "dev").unwrap();
         let already = create_subtask(&mut conn, &parent.id, "Plan", now() + 2, "dev").unwrap();
         set_done(&mut conn, &already.id, true, now() + 3, "dev").unwrap();
+        // A step of a step is closed by the same check.
+        let leaf =
+            create_subtask(&mut conn, &first.id, "Open the draft", now() + 4, "dev").unwrap();
         let before = oplog::len(&conn).unwrap();
 
         let done = set_done(&mut conn, &parent.id, true, now() + 10, "dev")
@@ -1295,13 +1347,16 @@ mod tests {
 
         assert!(done.task.done);
         let closed: Vec<_> = done.closed_steps.iter().map(|s| s.id.clone()).collect();
-        assert_eq!(closed, [first.id.clone(), second.id.clone()]);
+        assert_eq!(
+            closed,
+            [first.id.clone(), second.id.clone(), leaf.id.clone()]
+        );
         for step in &done.closed_steps {
             assert!(step.done);
             assert_eq!(step.completed_at, Some(now() + 10));
         }
-        // The parent and its two open steps: three rows, three oplog rows.
-        assert_eq!(oplog::len(&conn).unwrap(), before + 3);
+        // The parent and its three open steps: four rows, four oplog rows.
+        assert_eq!(oplog::len(&conn).unwrap(), before + 4);
         assert!(task(&conn, &already.id).unwrap().unwrap().done);
     }
 
@@ -1333,11 +1388,12 @@ mod tests {
             .unwrap()
             .task;
         let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        let leaf = create_subtask(&mut conn, &step.id, "Open the draft", now(), "dev").unwrap();
 
         let gone = delete(&mut conn, &parent.id, now() + 1, "dev")
             .unwrap()
             .unwrap();
-        assert_eq!(gone, [parent.id.clone(), step.id.clone()]);
+        assert_eq!(gone, [parent.id.clone(), step.id.clone(), leaf.id.clone()]);
         assert!(tasks(&conn).unwrap().is_empty());
 
         let restored = restore(&mut conn, &parent.id, now() + 2, "dev")
@@ -1349,8 +1405,8 @@ mod tests {
                 .iter()
                 .map(|s| s.id.as_str())
                 .collect::<Vec<_>>(),
-            [step.id.as_str()],
-            "undo brings the steps back with the task"
+            [step.id.as_str(), leaf.id.as_str()],
+            "undo brings the whole branch back with the task"
         );
         assert_eq!(
             task(&conn, &step.id).unwrap().map(|s| s.title),
@@ -1372,6 +1428,7 @@ mod tests {
         .unwrap();
         let parent = created.task;
         let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        let leaf = create_subtask(&mut conn, &step.id, "Open the draft", now(), "dev").unwrap();
         let studio = create_list(&mut conn, "Studio", now(), "dev").unwrap();
 
         set_list(&mut conn, &parent.id, Some(&studio.id), now() + 1, "dev")
@@ -1383,9 +1440,14 @@ mod tests {
             Some("Studio"),
             "a step is filed where its task is"
         );
-        // create task, its project, the step, the Studio project, and the two
-        // project moves (task and step)
-        assert_eq!(oplog::len(&conn).unwrap(), 6);
+        assert_eq!(
+            task(&conn, &leaf.id).unwrap().unwrap().list_name.as_deref(),
+            Some("Studio"),
+            "so is a step of a step"
+        );
+        // create task, its project, two steps, the Studio project, and the three
+        // project moves (task and both steps)
+        assert_eq!(oplog::len(&conn).unwrap(), 8);
 
         // Moving to no project takes the steps with it.
         set_list(&mut conn, &parent.id, None, now() + 2, "dev")

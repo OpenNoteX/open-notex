@@ -232,12 +232,13 @@ pub const SCENES: &[Scene] = &[
     ("tasks-steps", |s| {
         seed_tasks(s);
         s.route = Route::Tasks;
-        // A task broken into steps, one of them done, with the add field open:
-        // the whole feature in one frame.
-        for (id, title, done) in [
-            ("01S1", "Draft the outline", true),
-            ("01S2", "Add the screenshots", false),
-            ("01S3", "Ask for a review", false),
+        // A task broken into steps, one done and one broken down again, with a
+        // field open under a step: the tree in one frame.
+        for (id, title, done, parent) in [
+            ("01S1", "Draft the outline", true, "01T3"),
+            ("01S2", "Add the screenshots", false, "01T3"),
+            ("01S3", "Ask for a review", false, "01T3"),
+            ("01S4", "Crop the hero", false, "01S2"),
         ] {
             let mut step = task(
                 id,
@@ -247,10 +248,9 @@ pub const SCENES: &[Scene] = &[
                 done,
                 done.then_some("2026-11-19"),
             );
-            step.parent_id = Some("01T3".to_owned());
+            step.parent_id = Some(parent.to_owned());
             s.task_changed(step);
         }
-        s.toggle_expanded("01T3");
         s.begin_step("01T3");
         s.load = Load::Ready;
     }),
