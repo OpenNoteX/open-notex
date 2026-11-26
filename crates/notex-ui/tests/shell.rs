@@ -1252,7 +1252,10 @@ fn a_step_is_typed_under_its_task_and_shows_at_once() {
     click(&mut rt, "task-expand-01T1");
     settle(&mut rt);
 
-    assert!(rt.find("task-steps-01T1").is_some(), "the STEPS section");
+    assert!(
+        rt.find("task-step-new-01T1").is_some(),
+        "the row has a + for its steps"
+    );
     click(&mut rt, "task-step-new-01T1");
     settle(&mut rt);
     click(&mut rt, "task-step-input-01T1");
@@ -1282,6 +1285,132 @@ fn a_step_is_typed_under_its_task_and_shows_at_once() {
     assert!(
         rt.find("task-row-new-0").is_none(),
         "a step is not a top-level row"
+    );
+}
+
+#[test]
+fn a_step_holds_steps_and_the_tree_stops_at_three_levels() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+
+    let step = |id: &str, title: &str, parent: &str| notex_ui::TaskRow {
+        id: id.to_owned(),
+        title: title.to_owned(),
+        notes: String::new(),
+        done: false,
+        list_id: Some("01L1".to_owned()),
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: None,
+        completed_day: None,
+        parent_id: Some(parent.to_owned()),
+    };
+    for (id, title, parent) in [
+        ("01S1", "Draft the outline", "01T1"),
+        ("01S2", "Open the draft", "01S1"),
+        ("01S3", "Too deep", "01S2"),
+    ] {
+        rt.state.task_changed(step(id, title, parent));
+    }
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+
+    assert_eq!(rt.state.depth_of("01T1"), 1);
+    assert_eq!(rt.state.depth_of("01S2"), 3);
+    assert!(
+        rt.find("task-steps-head-01T1").is_none(),
+        "no STEPS heading"
+    );
+    assert!(rt.find("task-steps-01T1").is_some(), "steps under the task");
+    assert!(rt.find("task-steps-01S1").is_some(), "steps under a step");
+    assert!(rt.find("task-step-01S3").is_some(), "the third level shows");
+    assert!(
+        rt.find("task-step-new-01S1").is_some(),
+        "level two takes a step"
+    );
+    assert!(
+        rt.find("task-step-new-01S2").is_none(),
+        "level three takes none"
+    );
+
+    // A `+` on a step adds a step of that step, not another top-level one.
+    click(&mut rt, "task-step-new-01S1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-input-01S1");
+    rt.paste("Check the quotes");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateSubtask {
+            parent_id: "01S1".to_owned(),
+            title: "Check the quotes".to_owned(),
+        })
+    );
+    assert!(rt.find("task-step-new-0").is_some(), "the new step is here");
+
+    // The last level has no field to open.
+    rt.state.cancel_step();
+    rt.state.begin_step("01S2");
+    assert!(rt.state.step_input.is_none());
+}
+
+#[test]
+fn undo_names_the_real_step_when_the_answer_comes_after_the_check() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-step-new-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-input-01T1");
+    rt.paste("Write the notes");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.take_action().is_some());
+
+    // The parent is checked before the store answers the step, so the toast
+    // remembers the temporary id.
+    rt.state.toggle_task("01T1");
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T1".to_owned(),
+            done: true,
+        })
+    );
+
+    // The answer replaces the row; undo must name the real id, not `new-0`.
+    rt.state.task_changed(notex_ui::TaskRow {
+        id: "01S9".to_owned(),
+        title: "Write the notes".to_owned(),
+        notes: String::new(),
+        done: true,
+        list_id: Some("01L1".to_owned()),
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: Some(1_763_500_800_000),
+        completed_day: Some("2026-11-19".to_owned()),
+        parent_id: Some("01T1".to_owned()),
+    });
+    rt.invalidate();
+
+    rt.state.undo_task();
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T1".to_owned(),
+            done: false,
+        })
+    );
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01S9".to_owned(),
+            done: false,
+        })
     );
 }
 

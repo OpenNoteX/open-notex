@@ -100,14 +100,16 @@ assert!(rt.state.tasks[0].done);
   A project chip's `⋯` opens Rename… and Delete project; a rename is a field on
   the chip (a refused name stays open with the reason), and a delete releases
   its tasks to No project, drops the filter to All and offers the same undo.
-  A row breaks into steps: the expanded row's STEPS section lists them with
-  checkboxes, a `1/3` chip sits on the collapsed row, and Return in the
-  add-step field shows the step under its task at once and keeps the field open
-  for the next one; the store's row replaces the temporary one, a refusal puts
-  the line back under the same task (the task add row is untouched), steps are
-  not counted as open tasks or listed at the top level or in the archive,
-  completing a task sends one `SetTaskDone` for it, and the toast's Undo asks to
-  reopen the task and each step that check closed.
+  A row breaks into steps: a `+` on the row opens a one-line field at the end
+  of its steps, a `1/3` count sits on the row, and Return shows the step under
+  its task at once and keeps the field open for the next one; the steps are an
+  indented checklist with no STEPS heading, visible whether or not the details
+  are open, and a step can hold steps until the tree is three levels deep (the
+  last level has no `+` and no field opens there); the store's row replaces the
+  temporary one, a refusal puts the line back under the same task (the task add
+  row is untouched), steps are not counted as open tasks or listed at the top
+  level or in the archive, completing a task sends one `SetTaskDone` for it, and
+  the toast's Undo asks to reopen the task and every step that check closed.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -144,10 +146,11 @@ assert!(rt.state.tasks[0].done);
   project and a task note all come back from a relist; renaming a project
   renames its tasks' filing, and deleting it keeps the tasks, unfiles them, and
   undo refiles them into the restored project. A step typed under a task is
-  saved with its parent and the task's project, the expanded row draws it,
-  completing the task closes it in the same write, Undo reopens both, a restart
-  reads the step back under its task, and deleting a task takes its step with
-  the toast's undo bringing both back.
+  saved with its parent and the task's project, the row draws it, a step of a
+  step is saved at the third level, a fourth level opens no field, completing
+  the task closes the branch in the same write, Undo reopens all of it, a
+  restart reads the branch back, and deleting a task takes the branch with the
+  toast's undo bringing it all back.
 - `apps/open-notex/tests/vault.rs` covers the launch and the dialog without a
   window: `--vault` aside, the saved folder wins over the suggested one, a saved
   folder that is gone asks and is never replaced by the default, a broken config

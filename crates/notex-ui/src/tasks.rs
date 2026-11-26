@@ -13,7 +13,10 @@ use rune_kit::{
 };
 
 use crate::home::parse_color;
-use crate::state::{ProjectEdit, State, TaskRow};
+use crate::state::{ProjectEdit, State, StepInput, TaskRow};
+
+/// How far one level of a task tree sits from the one above it.
+const STEP_INDENT: f32 = 22.0;
 
 /// The whole screen: header, filter chips, the add row and the list.
 pub fn tasks_pane(s: &State, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -566,28 +569,15 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
     let steps = s.steps_of(&task.id);
     if !steps.is_empty() {
         let done = steps.iter().filter(|step| step.done).count();
-        let open = steps.len() - done;
-        let id = task.id.clone();
         line = line.child(
-            row()
+            text(format!("{done}/{}", steps.len()))
                 .key(format!("task-steps-chip-{}", task.id))
-                .h(20.0)
-                .px(6.0)
-                .center_y()
-                .radius(10.0)
-                .label(format!("{done} of {} steps done", steps.len()))
-                .focusable(true)
-                .hover(c.hover)
-                .on_press(move |s: &mut State| s.toggle_expanded(&id))
-                .child(
-                    text(format!("{done}/{}", steps.len()))
-                        .font(k.ty.caption())
-                        .color(if open == 0 {
-                            c.text_faint
-                        } else {
-                            c.text_muted
-                        }),
-                ),
+                .font(k.ty.caption())
+                .color(if done == steps.len() {
+                    c.text_faint
+                } else {
+                    c.text_muted
+                }),
         );
     }
 
@@ -623,12 +613,28 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
 
     let expand = task.id.clone();
     let remove = task.id.clone();
+    let add = task.id.clone();
+    // A tree stops at MAX_TASK_DEPTH levels, so a row on the last one has no
+    // `+` at all rather than one that refuses. A done row takes no step either.
+    let can_add = !task.done && s.depth_of(&task.id) < notex_core::MAX_TASK_DEPTH;
     let actions = row()
         .child(el().grow(1.0))
         .key(format!("task-actions-{}", task.id))
         .gap(2.0)
         .center_y()
         .group_opacity(0.0, 1.0)
+        .children(can_add.then(|| {
+            IconButton::new(&crate::icons::PLUS)
+                .variant(IconButtonVariant::GhostMuted)
+                .control_size(ControlSize::Small)
+                .label("Add a step")
+                .on_press_tx(move |s: &mut State, tx| {
+                    s.begin_step(&add);
+                    s.flush(tx);
+                })
+                .build(k)
+                .key(format!("task-step-new-{}", task.id))
+        }))
         .child(
             IconButton::new(if expanded {
                 k.glyph.chevron_up
@@ -660,16 +666,25 @@ fn task_row(s: &State, task: &TaskRow, k: &Kit) -> El {
         );
     line = line.child(actions);
 
-    if expanded {
-        col()
-            .key(format!("task-expanded-{}", task.id))
-            .w_full()
-            .gap(2.0)
-            .child(line)
-            .child(expanded_body(s, task, k))
+    let mut block = col()
+        .key(format!("task-block-{}", task.id))
+        .w_full()
+        .gap(1.0);
+    block = if expanded {
+        block.child(
+            col()
+                .key(format!("task-expanded-{}", task.id))
+                .w_full()
+                .gap(2.0)
+                .child(line)
+                .child(expanded_body(s, task, k)),
+        )
     } else {
-        line
-    }
+        block.child(line)
+    };
+    // The steps sit under the row whether the details are open or not: they are
+    // part of the checklist, not a panel about it.
+    block.children(step_tree(s, task, k, 2))
 }
 
 /// Notes, dates and the project picker, under one row.
@@ -682,7 +697,6 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
         .pl(32.0)
         .pr(8.0)
         .gap(8.0)
-        .child(steps_section(s, task, k))
         .child(text("DUE").font(k.ty.text_xsmall).color(c.text_faint));
 
     let mut due_row = row()
@@ -792,111 +806,47 @@ fn expanded_body(s: &State, task: &TaskRow, k: &Kit) -> El {
     body
 }
 
-/// The steps under an expanded task: one checkbox each, the add field, and a
-/// count. A step is an ordinary task row, so it uses the same checkbox, rename
-/// field and delete button the checklist does.
-fn steps_section(s: &State, task: &TaskRow, k: &Kit) -> El {
-    let c = &k.c;
-    let steps = s.steps_of(&task.id);
-    let done = steps.iter().filter(|step| step.done).count();
-    let mut section = col()
-        .key(format!("task-steps-{}", task.id))
-        .w_full()
-        .gap(2.0)
-        .child(
-            row()
-                .key(format!("task-steps-head-{}", task.id))
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .child(text("STEPS").font(k.ty.text_xsmall).color(c.text_faint))
-                .children((!steps.is_empty()).then(|| {
-                    text(format!("{done} of {}", steps.len()))
-                        .key(format!("task-steps-count-{}", task.id))
-                        .font(k.ty.text_xsmall)
-                        .color(c.text_faint)
-                })),
-        );
-
-    for step in steps {
-        section = section.child(step_row(s, step, k));
-    }
-
-    match s
+/// The checklist under one row: each step, then its own steps, indented. The
+/// tree is always visible, so a task's breakdown reads as part of the list
+/// rather than a panel that opens. `depth` is the level the steps sit at.
+fn step_tree(s: &State, parent: &TaskRow, k: &Kit, depth: usize) -> Option<El> {
+    let steps = s.steps_of(&parent.id);
+    let adding = s
         .step_input
         .as_ref()
-        .filter(|input| input.parent_id == task.id)
-    {
-        Some(input) => {
-            section = section.child(
-                row()
-                    .key(format!("task-step-add-{}", task.id))
-                    .w_full()
-                    .px(8.0)
-                    .py(2.0)
-                    .gap(8.0)
-                    .center_y()
-                    .child(icon(&crate::icons::PLUS, 12.0).color(c.icon_faint))
-                    .child(
-                        text_input(&input.edit, k.ty.text_xsmall)
-                            .single_line()
-                            .key(format!("task-step-input-{}", task.id))
-                            .label("Add a step")
-                            .grow(1.0)
-                            .shrink()
-                            .min_w(0.0)
-                            .autofocus()
-                            .color(c.text_base)
-                            .caret(c.text_base, k.selection())
-                            .placeholder("Add a step\u{2026}".to_owned(), c.text_faint)
-                            .on_edit(|s: &mut State| &mut s.step_input.as_mut().unwrap().edit)
-                            .on_submit(|s: &mut State, tx| {
-                                s.add_step_now();
-                                s.flush(tx);
-                            })
-                            .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
-                                if ev.key == Key::Escape {
-                                    s.cancel_step();
-                                    true
-                                } else {
-                                    false
-                                }
-                            }),
-                    ),
-            );
-        }
-        None => {
-            let id = task.id.clone();
-            section = section.child(
-                Button::new("Add a step")
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Small)
-                    .icon(&crate::icons::PLUS)
-                    .on_press_tx(move |s: &mut State, tx| {
-                        s.begin_step(&id);
-                        s.flush(tx);
-                    })
-                    .build(k)
-                    .key(format!("task-step-new-{}", task.id)),
-            );
-        }
+        .filter(|input| input.parent_id == parent.id);
+    if steps.is_empty() && adding.is_none() {
+        return None;
     }
-    section
+    let mut tree = col()
+        .key(format!("task-steps-{}", parent.id))
+        .w_full()
+        .gap(1.0)
+        .pl(STEP_INDENT);
+    for step in steps {
+        tree = tree.child(step_row(s, step, k, depth));
+    }
+    if let Some(input) = adding {
+        tree = tree.child(step_input_row(input, &parent.id, k));
+    }
+    Some(tree)
 }
 
-/// One step: checkbox, title, delete. Renaming reuses the checklist's in-place
-/// field, so there is one editor for every task-shaped row.
-fn step_row(s: &State, step: &TaskRow, k: &Kit) -> El {
+/// One step: checkbox, title, and its own `+` and trash. Renaming reuses the
+/// checklist's in-place field, so there is one editor for every task-shaped row.
+fn step_row(s: &State, step: &TaskRow, k: &Kit, depth: usize) -> El {
     let c = &k.c;
     let editing = s.task_edit.as_ref().filter(|edit| edit.id == step.id);
     let check = step.id.clone();
     let remove = step.id.clone();
+    let add = step.id.clone();
+    let can_add = !step.done && depth < notex_core::MAX_TASK_DEPTH;
     let mut line = row()
         .key(format!("task-step-{}", step.id))
         .w_full()
         .min_h(26.0)
-        .px(8.0)
         .py(2.0)
+        .pr(8.0)
         .gap(8.0)
         .center_y()
         .radius(k.radius.sm)
@@ -953,12 +903,24 @@ fn step_row(s: &State, step: &TaskRow, k: &Kit) -> El {
         }
     };
 
-    line.child(
+    line = line.child(
         row()
             .key(format!("task-step-actions-{}", step.id))
             .gap(2.0)
             .center_y()
             .group_opacity(0.0, 1.0)
+            .children(can_add.then(|| {
+                IconButton::new(&crate::icons::PLUS)
+                    .variant(IconButtonVariant::GhostMuted)
+                    .control_size(ControlSize::Small)
+                    .label("Add a step")
+                    .on_press_tx(move |s: &mut State, tx| {
+                        s.begin_step(&add);
+                        s.flush(tx);
+                    })
+                    .build(k)
+                    .key(format!("task-step-new-{}", step.id))
+            }))
             .child(
                 IconButton::new(&crate::icons::TRASH)
                     .variant(IconButtonVariant::GhostMuted)
@@ -971,7 +933,55 @@ fn step_row(s: &State, step: &TaskRow, k: &Kit) -> El {
                     .build(k)
                     .key(format!("task-step-delete-{}", step.id)),
             ),
-    )
+    );
+
+    let mut block = col()
+        .key(format!("task-step-block-{}", step.id))
+        .w_full()
+        .gap(1.0)
+        .child(line);
+    block = block.children(step_tree(s, step, k, depth + 1));
+    block
+}
+
+/// The one-line field a `+` opens. It sits at the end of that row's steps, so a
+/// run of Returns adds a checklist in reading order.
+fn step_input_row(input: &StepInput, parent_id: &str, k: &Kit) -> El {
+    let c = &k.c;
+    row()
+        .key(format!("task-step-add-{}", parent_id))
+        .w_full()
+        .py(2.0)
+        .pr(8.0)
+        .gap(8.0)
+        .center_y()
+        .child(icon(&crate::icons::PLUS, 12.0).color(c.icon_faint))
+        .child(
+            text_input(&input.edit, k.ty.text_xsmall)
+                .single_line()
+                .key(format!("task-step-input-{}", parent_id))
+                .label("Add a step")
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .autofocus()
+                .color(c.text_base)
+                .caret(c.text_base, k.selection())
+                .placeholder("Add a step\u{2026}".to_owned(), c.text_faint)
+                .on_edit(|s: &mut State| &mut s.step_input.as_mut().unwrap().edit)
+                .on_submit(|s: &mut State, tx| {
+                    s.add_step_now();
+                    s.flush(tx);
+                })
+                .on_input_key(|s: &mut State, ev: &KeyEvent, _| {
+                    if ev.key == Key::Escape {
+                        s.cancel_step();
+                        true
+                    } else {
+                        false
+                    }
+                }),
+        )
 }
 
 /// The status and the save button, only while there is something to save. An

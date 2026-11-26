@@ -19,22 +19,27 @@ All notable changes to this project. The format follows
 - Adding is one borderless row: `Return` writes the task and leaves the caret
   there for the next one, and `#project` files it under a project, creating the
   project when the name is new. A filtered list adds into the project it shows.
-- A task can be broken into **steps**: the chevron's row opens a STEPS section
-  where a line becomes a step and Return keeps the field open for the next one.
-  A step is a task row with a parent, so it has its own checkbox, in-place
-  rename and delete; it is filed with its task (moving the task moves its
-  steps) and never takes a date of its own. The collapsed row shows `1/3`.
-  Completing a task closes its open steps in the same write, and the toast's
-  Undo reopens the task and the steps that check closed. Deleting a task takes
-  its steps with it; undo restores them.
+- A task can be broken into **steps** that nest three levels deep. A `+` on a
+  row opens a one-line field at the end of that row's steps, and Return keeps
+  the field open for the next one. The steps are a checklist under the row,
+  indented one level each, with no STEPS heading: they are visible whether or
+  not the row's notes and dates are open, and the last level has no `+`. A step
+  is a task row with a parent, so it has its own checkbox, in-place rename and
+  delete; it is filed with its task (moving the task moves the whole branch)
+  and never takes a date of its own. The row shows a `1/3` count.
+  Completing a task closes every open step below it in the same write, and the
+  toast's Undo reopens the task and the steps that check closed. Deleting a
+  task takes its branch with it; undo restores it.
 - `notex-store`: `migrations/0004` with a partial index on `parent_id`;
   `Cmd::CreateSubtask`, `tasks::create_subtask`, `Completion` and `Restored`,
-  and `Task.parent_id`. `set_done` closes open steps in one transaction (one
-  oplog row each), `delete` answers with every id it removed, `restore` brings
-  back the steps deleted by that same delete, and `set_list` refiles the steps
-  with the task.
+  and `Task.parent_id`. `create_subtask` stops at
+  `notex_core::MAX_TASK_DEPTH`. `set_done` closes every open step below the task
+  in one transaction (one oplog row each), `delete` answers with every id it
+  removed, `restore` brings back the steps deleted by that same delete, and
+  `set_list` refiles the branch with the task.
 - `notex-ui`: `TaskRow.parent_id`, `AddTarget`, `StepInput`, `steps_of`,
-  `open_steps_of`, `begin_step`, `add_step_now` and the `tasks-steps` scene.
+  `open_steps_of`, `depth_of`, `begin_step`, `add_step_now` and the
+  `tasks-steps` scene.
 - A row's title renames in place (`Return` saves, `Escape` puts it back). The
   due chip reads as a person would say it — `2d late`, `Today`, `Tomorrow`,
   `Fri`, `23 Nov` — and the chevron opens due buttons (Today, Tomorrow, Next
