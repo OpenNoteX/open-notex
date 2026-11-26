@@ -87,6 +87,7 @@ fn task(
         due_day: due_day.map(str::to_owned),
         completed_at: completed_day.map(|_| 1_763_500_800_000),
         completed_day: completed_day.map(str::to_owned),
+        parent_id: None,
     }
 }
 
@@ -226,6 +227,31 @@ pub const SCENES: &[Scene] = &[
         seed_tasks(s);
         s.route = Route::Tasks;
         s.toggle_expanded("01T3");
+        s.load = Load::Ready;
+    }),
+    ("tasks-steps", |s| {
+        seed_tasks(s);
+        s.route = Route::Tasks;
+        // A task broken into steps, one of them done, with the add field open:
+        // the whole feature in one frame.
+        for (id, title, done) in [
+            ("01S1", "Draft the outline", true),
+            ("01S2", "Add the screenshots", false),
+            ("01S3", "Ask for a review", false),
+        ] {
+            let mut step = task(
+                id,
+                title,
+                None,
+                Some(("01L3", "Studio", "#5a6fb0")),
+                done,
+                done.then_some("2026-11-19"),
+            );
+            step.parent_id = Some("01T3".to_owned());
+            s.task_changed(step);
+        }
+        s.toggle_expanded("01T3");
+        s.begin_step("01T3");
         s.load = Load::Ready;
     }),
     ("tasks-undo", |s| {

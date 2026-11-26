@@ -391,6 +391,14 @@ pub fn pump(state: &mut State, handle: &StoreHandle) -> bool {
                     state.task_failed("The store is no longer running.");
                 }
             }
+            Action::CreateSubtask { parent_id, title } => {
+                if handle
+                    .send(Cmd::CreateSubtask { parent_id, title })
+                    .is_err()
+                {
+                    state.add_failed("The store is no longer running.");
+                }
+            }
             Action::DeleteTask(id) => {
                 if handle.send(Cmd::DeleteTask { id }).is_err() {
                     state.task_failed("The store is no longer running.");
@@ -580,6 +588,7 @@ fn task_row(task: notex_store::Task) -> TaskRow {
         list_color: task.list_color,
         due_day: task.due_day,
         completed_at: task.completed_at,
+        parent_id: task.parent_id,
     }
 }
 

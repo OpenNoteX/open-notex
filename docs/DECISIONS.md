@@ -235,3 +235,37 @@ oldest unanswered create owns the next unknown id. *Reopen when* actions can
 come from outside the window (a menu bar item, a notification): those need the
 same wake, and the store should then echo the caller's tag instead of relying on
 order.
+
+## 0021 — A step is a task with a parent
+
+A step is a row in `tasks` with `parent_id` set, not a second table. It keeps the
+whole model it already has: title, notes, done, `completed_at`, `rev`, a soft
+delete and an oplog row for every write. A separate `steps` table would have had
+to duplicate all of that, and every query, export and future sync would need to
+know two shapes for "a thing you check off". One level only: a step cannot hold
+steps, and a finished task takes no new step.
+
+A step is filed where its task is. `create_subtask` copies the task's project,
+and `set_list` moves the task's open steps in the same transaction, one oplog row
+each, so a project filter, an export and the join never disagree. A step never
+takes a due day of its own: it belongs to its task's day. The checklist leaves
+steps out of its top level, its open count and its archive, and draws them under
+the task instead; the collapsed row carries a `1/3` chip.
+
+Checking a task checks its open steps: `set_done` reads the open step ids first,
+then closes the task and each step in one transaction. A step that was already
+done is left alone, so the write changes exactly what it reports. Reopening a
+task does **not** reopen its steps — a step someone finished stays finished —
+but the toast's Undo is not a plain reopen: the UI remembers which steps that
+check closed and asks to reopen each, so undo takes the whole check back.
+Deleting a task soft-deletes its steps in the same transaction and answers with
+every id, so no step is left on screen under a task that is gone. Undo restores
+the steps whose `deleted_at` equals the task's, which is the delete being undone;
+a step deleted on its own earlier keeps its own timestamp and stays gone.
+
+The add-step field is optimistic and stays open, for the same reasons as the add
+row (0020): the step shows under its task in the frame Return is handled, and a
+run of steps is a run of lines. `PendingAdd` carries an `AddTarget` so a refusal
+puts the line back in the field it came from — the step's field, not the task add
+row — and the queue is still FIFO, so the oldest unanswered create owns the next
+unknown id.

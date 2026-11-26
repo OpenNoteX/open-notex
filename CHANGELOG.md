@@ -19,6 +19,22 @@ All notable changes to this project. The format follows
 - Adding is one borderless row: `Return` writes the task and leaves the caret
   there for the next one, and `#project` files it under a project, creating the
   project when the name is new. A filtered list adds into the project it shows.
+- A task can be broken into **steps**: the chevron's row opens a STEPS section
+  where a line becomes a step and Return keeps the field open for the next one.
+  A step is a task row with a parent, so it has its own checkbox, in-place
+  rename and delete; it is filed with its task (moving the task moves its
+  steps) and never takes a date of its own. The collapsed row shows `1/3`.
+  Completing a task closes its open steps in the same write, and the toast's
+  Undo reopens the task and the steps that check closed. Deleting a task takes
+  its steps with it; undo restores them.
+- `notex-store`: `migrations/0004` with a partial index on `parent_id`;
+  `Cmd::CreateSubtask`, `tasks::create_subtask`, `Completion` and `Restored`,
+  and `Task.parent_id`. `set_done` closes open steps in one transaction (one
+  oplog row each), `delete` answers with every id it removed, `restore` brings
+  back the steps deleted by that same delete, and `set_list` refiles the steps
+  with the task.
+- `notex-ui`: `TaskRow.parent_id`, `AddTarget`, `StepInput`, `steps_of`,
+  `open_steps_of`, `begin_step`, `add_step_now` and the `tasks-steps` scene.
 - A row's title renames in place (`Return` saves, `Escape` puts it back). The
   due chip reads as a person would say it — `2d late`, `Today`, `Tomorrow`,
   `Fri`, `23 Nov` — and the chevron opens due buttons (Today, Tomorrow, Next

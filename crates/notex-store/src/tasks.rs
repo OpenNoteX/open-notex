@@ -29,6 +29,9 @@ pub struct Task {
     pub completed_at: Option<i64>,
     pub created_at: i64,
     pub rev: i64,
+    /// The task this is a step of. A step is a task row, so it has the same
+    /// title, notes and done flag; it only differs in where the UI puts it.
+    pub parent_id: Option<String>,
 }
 
 /// A project. `position` is the order the filter chips are shown in.
@@ -46,6 +49,15 @@ pub struct Created {
     pub list: Option<List>,
 }
 
+/// The answer to completing a task: the row, plus the steps that completion
+/// closed. Only steps that were open are in `closed_steps`, so undoing the
+/// completion reopens exactly what it changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub task: Task,
+    pub closed_steps: Vec<Task>,
+}
+
 /// A deleted project and the tasks it released. The ids are what undo needs to
 /// put each task back where it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +68,14 @@ pub struct ListGone {
 
 const SELECT: &str = "\
 SELECT t.id, t.title, t.notes, t.status, t.list_id, l.name, l.color,
-       t.due_day, t.completed_at, t.created_at, t.rev
+       t.due_day, t.completed_at, t.created_at, t.rev, t.parent_id
 FROM tasks t
 LEFT JOIN lists l ON l.id = t.list_id AND l.deleted_at IS NULL";
 
 /// Every task that is not deleted, open first, then by day and age.
 pub fn tasks(conn: &Connection) -> Result<Vec<Task>, StoreError> {
     let sql = format!(
-        "{SELECT} WHERE t.deleted_at IS NULL ORDER BY (t.status = 'done'), t.due_day IS NULL, t.due_day, t.created_at"
+        "{SELECT} WHERE t.deleted_at IS NULL ORDER BY (t.status = 'done'), t.due_day IS NULL, t.due_day, t.created_at, t.rowid"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], row_to_task)?;
@@ -147,6 +159,51 @@ pub fn create(
     })
 }
 
+/// Add a step under a task. A step is an ordinary task row with `parent_id`
+/// set: it inherits the parent's project (so filtering and export agree) and
+/// has no due day of its own. One level only, and only under an open task.
+pub fn create_subtask(
+    conn: &mut Connection,
+    parent_id: &str,
+    title: &str,
+    now: i64,
+    device_id: &str,
+) -> Result<Task, StoreError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(StoreError::EmptyStepTitle);
+    }
+    let tx = conn.transaction()?;
+    let Some(parent) = task(&tx, parent_id)? else {
+        return Err(StoreError::MissingTask);
+    };
+    if parent.parent_id.is_some() {
+        return Err(StoreError::NestedStep);
+    }
+    if parent.done {
+        return Err(StoreError::TaskIsDone);
+    }
+    let id = ItemId::new().to_string();
+    tx.execute(
+        "INSERT INTO tasks(id, parent_id, list_id, title, status,
+                           created_at, updated_at, sort_key)
+         VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5, '')",
+        params![id, parent_id, parent.list_id, title, now],
+    )?;
+    oplog::append(
+        &tx,
+        oplog::Entry {
+            payload: &json(&[("title", title), ("parent_id", parent_id)]),
+            at: now,
+            device_id,
+            ..oplog::Entry::new("task", &id, "create")
+        },
+    )?;
+    let step = task(&tx, &id)?.expect("the step just inserted");
+    tx.commit()?;
+    Ok(step)
+}
+
 /// Rename a task. `None` means the row is gone (deleted elsewhere).
 pub fn set_title(
     conn: &mut Connection,
@@ -157,7 +214,6 @@ pub fn set_title(
 ) -> Result<Option<Task>, StoreError> {
     update(conn, id, "title", &[("title", title)], now, device_id)
 }
-
 pub fn set_notes(
     conn: &mut Connection,
     id: &str,
@@ -194,6 +250,33 @@ pub fn set_list(
             ..oplog::Entry::new("task", id, "project")
         },
     )?;
+    // A step is filed where its task is: moving the task moves its open steps
+    // in the same write, so a project filter and an export never disagree.
+    let step_ids: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM tasks
+             WHERE parent_id = ?1 AND deleted_at IS NULL AND list_id IS NOT ?2
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![id, list_id], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for step_id in &step_ids {
+        tx.execute(
+            "UPDATE tasks SET list_id = ?2, updated_at = ?3, rev = rev + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![step_id, list_id, now],
+        )?;
+        oplog::append(
+            &tx,
+            oplog::Entry {
+                payload: &json(&[("list_id", list_id.unwrap_or(""))]),
+                at: now,
+                device_id,
+                ..oplog::Entry::new("task", step_id, "project")
+            },
+        )?;
+    }
     let task = task(&tx, id)?;
     tx.commit()?;
     Ok(task)
@@ -234,15 +317,41 @@ pub fn set_due(
 
 /// Complete or reopen. Completing stamps `completed_at`; reopening clears it,
 /// so "how long did this take" is never mixed with "when was it last touched".
+/// Completing a task with steps closes its open steps in the same transaction,
+/// one oplog row each; a step that was already done is left alone.
 pub fn set_done(
     conn: &mut Connection,
     id: &str,
     done: bool,
     now: i64,
     device_id: &str,
-) -> Result<Option<Task>, StoreError> {
+) -> Result<Option<Completion>, StoreError> {
     let tx = conn.transaction()?;
-    let changed = tx.execute(
+    let Some(parent_id) = tx
+        .query_row(
+            "SELECT parent_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    // The ids are read before the update, so only steps that were open at this
+    // moment are closed by this completion.
+    let step_ids: Vec<String> = if done && parent_id.is_none() {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM tasks
+             WHERE parent_id = ?1 AND deleted_at IS NULL AND status = 'open'
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map([id], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+
+    tx.execute(
         "UPDATE tasks SET status = ?2, completed_at = ?3,
                           updated_at = ?4, rev = rev + 1
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -253,9 +362,6 @@ pub fn set_done(
             now
         ],
     )?;
-    if changed == 0 {
-        return Ok(None);
-    }
     oplog::append(
         &tx,
         oplog::Entry {
@@ -265,56 +371,110 @@ pub fn set_done(
             ..oplog::Entry::new("task", id, if done { "complete" } else { "reopen" })
         },
     )?;
-    let task = task(&tx, id)?;
+    let mut closed_steps = Vec::with_capacity(step_ids.len());
+    for step_id in &step_ids {
+        tx.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ?2,
+                              updated_at = ?2, rev = rev + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![step_id, now],
+        )?;
+        oplog::append(
+            &tx,
+            oplog::Entry {
+                payload: &json(&[("done", "true")]),
+                at: now,
+                device_id,
+                ..oplog::Entry::new("task", step_id, "complete")
+            },
+        )?;
+        closed_steps.push(task(&tx, step_id)?.expect("the step just completed"));
+    }
+    let task = task(&tx, id)?.expect("the task just updated");
+    // A no-op write still answers with the row: the caller may have been out of
+    // date, and the row it gets back is the truth.
     tx.commit()?;
-    Ok(task)
+    Ok(Some(Completion { task, closed_steps }))
 }
 
 /// Soft delete. The row stays, with its oplog trail, so undo is one update and
-/// an export still knows the task existed.
+/// an export still knows the task existed. Deleting a task deletes its steps in
+/// the same transaction; the ids come back so the checklist can drop each row.
 pub fn delete(
     conn: &mut Connection,
     id: &str,
     now: i64,
     device_id: &str,
-) -> Result<bool, StoreError> {
+) -> Result<Option<Vec<String>>, StoreError> {
     let tx = conn.transaction()?;
-    let changed = tx.execute(
-        "UPDATE tasks SET deleted_at = ?2, updated_at = ?2, rev = rev + 1
-         WHERE id = ?1 AND deleted_at IS NULL",
-        params![id, now],
-    )?;
-    if changed == 0 {
-        return Ok(false);
+    let Some(parent_id) = tx
+        .query_row(
+            "SELECT parent_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut ids = vec![id.to_owned()];
+    if parent_id.is_none() {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM tasks
+             WHERE parent_id = ?1 AND deleted_at IS NULL
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map([id], |row| row.get(0))?;
+        ids.extend(rows.collect::<Result<Vec<String>, _>>()?);
     }
-    oplog::append(
-        &tx,
-        oplog::Entry {
-            at: now,
-            device_id,
-            ..oplog::Entry::new("task", id, "delete")
-        },
-    )?;
+    for gone in &ids {
+        tx.execute(
+            "UPDATE tasks SET deleted_at = ?2, updated_at = ?2, rev = rev + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![gone, now],
+        )?;
+        oplog::append(
+            &tx,
+            oplog::Entry {
+                at: now,
+                device_id,
+                ..oplog::Entry::new("task", gone, "delete")
+            },
+        )?;
+    }
     tx.commit()?;
-    Ok(true)
+    Ok(Some(ids))
 }
 
 /// Undo a delete: the same row, no copy, so its history stays in one place.
+/// The steps deleted by that same delete come back too: a step deleted on its
+/// own earlier keeps its own `deleted_at` and stays gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    pub task: Task,
+    pub steps: Vec<Task>,
+}
+
 pub fn restore(
     conn: &mut Connection,
     id: &str,
     now: i64,
     device_id: &str,
-) -> Result<Option<Task>, StoreError> {
+) -> Result<Option<Restored>, StoreError> {
     let tx = conn.transaction()?;
-    let changed = tx.execute(
+    let Some(deleted_at) = tx
+        .query_row("SELECT deleted_at FROM tasks WHERE id = ?1", [id], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    tx.execute(
         "UPDATE tasks SET deleted_at = NULL, updated_at = ?2, rev = rev + 1
          WHERE id = ?1",
         params![id, now],
     )?;
-    if changed == 0 {
-        return Ok(None);
-    }
     oplog::append(
         &tx,
         oplog::Entry {
@@ -323,9 +483,40 @@ pub fn restore(
             ..oplog::Entry::new("task", id, "restore")
         },
     )?;
-    let task = task(&tx, id)?;
+    let step_ids: Vec<String> = match deleted_at {
+        Some(deleted_at) => {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM tasks
+                 WHERE parent_id = ?1 AND deleted_at = ?2
+                 ORDER BY created_at, rowid",
+            )?;
+            let rows = stmt.query_map(params![id, deleted_at], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        }
+        None => Vec::new(),
+    };
+    let mut steps = Vec::with_capacity(step_ids.len());
+    for step_id in step_ids {
+        tx.execute(
+            "UPDATE tasks SET deleted_at = NULL, updated_at = ?2, rev = rev + 1
+             WHERE id = ?1",
+            params![step_id, now],
+        )?;
+        oplog::append(
+            &tx,
+            oplog::Entry {
+                at: now,
+                device_id,
+                ..oplog::Entry::new("task", &step_id, "restore")
+            },
+        )?;
+        if let Some(step) = task(&tx, &step_id)? {
+            steps.push(step);
+        }
+    }
+    let task = task(&tx, id)?.expect("the task just restored");
     tx.commit()?;
-    Ok(task)
+    Ok(Some(Restored { task, steps }))
 }
 
 /// Create a project, in the same transaction as its oplog row.
@@ -634,6 +825,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         completed_at: row.get(8)?,
         created_at: row.get(9)?,
         rev: row.get(10)?,
+        parent_id: row.get(11)?,
     })
 }
 
@@ -705,14 +897,16 @@ mod tests {
 
         let done = set_done(&mut conn, &task.id, true, now() + 5, "dev")
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .task;
         assert!(done.done);
         assert_eq!(done.completed_at, Some(now() + 5));
         assert_eq!(done.rev, task.rev + 1);
 
         let open = set_done(&mut conn, &task.id, false, now() + 9, "dev")
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .task;
         assert!(!open.done);
         assert_eq!(open.completed_at, None);
     }
@@ -724,15 +918,22 @@ mod tests {
             .unwrap()
             .task;
 
-        assert!(delete(&mut conn, &row.id, now() + 1, "dev").unwrap());
+        let gone = delete(&mut conn, &row.id, now() + 1, "dev")
+            .unwrap()
+            .expect("the row was there");
+        assert_eq!(gone, [row.id.as_str()]);
         assert!(tasks(&conn).unwrap().is_empty(), "a deleted task is hidden");
         assert_eq!(task(&conn, &row.id).unwrap(), None);
 
         let restored = restore(&mut conn, &row.id, now() + 2, "dev")
             .unwrap()
             .unwrap();
-        assert_eq!(restored.id, row.id);
-        assert_eq!(restored.title, "Later");
+        assert_eq!(restored.task.id, row.id);
+        assert_eq!(restored.task.title, "Later");
+        assert!(
+            restored.steps.is_empty(),
+            "a task with no steps restores none"
+        );
         assert_eq!(tasks(&conn).unwrap().len(), 1);
     }
 
@@ -974,7 +1175,7 @@ mod tests {
             set_done(&mut conn, "nope", true, now(), "dev").unwrap(),
             None
         );
-        assert!(!delete(&mut conn, "nope", now(), "dev").unwrap());
+        assert_eq!(delete(&mut conn, "nope", now(), "dev").unwrap(), None);
         assert_eq!(
             set_due(&mut conn, "nope", None, now(), "dev").unwrap(),
             None
@@ -1011,5 +1212,202 @@ mod tests {
             .map(|task| task.title)
             .collect();
         assert_eq!(titles, ["Soon", "Later", "Someday", "Done"]);
+    }
+
+    #[test]
+    fn a_step_is_a_task_that_keeps_its_parents_project() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(
+            &mut conn,
+            "Ship the release",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap()
+        .task;
+
+        let step = create_subtask(
+            &mut conn,
+            &parent.id,
+            "  Write the notes  ",
+            now() + 1,
+            "dev",
+        )
+        .unwrap();
+
+        assert_eq!(step.title, "Write the notes", "the title is trimmed");
+        assert_eq!(step.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(
+            step.list_id, parent.list_id,
+            "a step is filed with its parent"
+        );
+        assert_eq!(step.due_day, None, "a step has no day of its own");
+        assert!(!step.done);
+        assert_eq!(oplog::len(&conn).unwrap(), 3, "create task, project, step");
+        assert_eq!(tasks(&conn).unwrap().len(), 2, "both rows are in the list");
+    }
+
+    #[test]
+    fn a_step_cannot_hold_steps_and_a_done_task_takes_none() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(&mut conn, "Ship", None, None, now(), "dev")
+            .unwrap()
+            .task;
+        let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+
+        assert!(matches!(
+            create_subtask(&mut conn, &step.id, "Too deep", now(), "dev"),
+            Err(StoreError::NestedStep)
+        ));
+        assert!(matches!(
+            create_subtask(&mut conn, "nope", "Orphan", now(), "dev"),
+            Err(StoreError::MissingTask)
+        ));
+        assert!(matches!(
+            create_subtask(&mut conn, &parent.id, "   ", now(), "dev"),
+            Err(StoreError::EmptyStepTitle)
+        ));
+
+        set_done(&mut conn, &parent.id, true, now(), "dev").unwrap();
+        assert!(matches!(
+            create_subtask(&mut conn, &parent.id, "Late", now(), "dev"),
+            Err(StoreError::TaskIsDone)
+        ));
+    }
+
+    #[test]
+    fn completing_a_task_closes_its_open_steps_in_one_transaction() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(&mut conn, "Ship", None, None, now(), "dev")
+            .unwrap()
+            .task;
+        let first = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        let second = create_subtask(&mut conn, &parent.id, "Test", now() + 1, "dev").unwrap();
+        let already = create_subtask(&mut conn, &parent.id, "Plan", now() + 2, "dev").unwrap();
+        set_done(&mut conn, &already.id, true, now() + 3, "dev").unwrap();
+        let before = oplog::len(&conn).unwrap();
+
+        let done = set_done(&mut conn, &parent.id, true, now() + 10, "dev")
+            .unwrap()
+            .unwrap();
+
+        assert!(done.task.done);
+        let closed: Vec<_> = done.closed_steps.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(closed, [first.id.clone(), second.id.clone()]);
+        for step in &done.closed_steps {
+            assert!(step.done);
+            assert_eq!(step.completed_at, Some(now() + 10));
+        }
+        // The parent and its two open steps: three rows, three oplog rows.
+        assert_eq!(oplog::len(&conn).unwrap(), before + 3);
+        assert!(task(&conn, &already.id).unwrap().unwrap().done);
+    }
+
+    #[test]
+    fn reopening_a_task_leaves_its_steps_closed() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(&mut conn, "Ship", None, None, now(), "dev")
+            .unwrap()
+            .task;
+        let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        set_done(&mut conn, &parent.id, true, now(), "dev").unwrap();
+
+        let open = set_done(&mut conn, &parent.id, false, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+
+        assert!(!open.task.done);
+        assert!(open.closed_steps.is_empty(), "reopening closes nothing");
+        assert!(
+            task(&conn, &step.id).unwrap().unwrap().done,
+            "a step that was finished stays finished"
+        );
+    }
+
+    #[test]
+    fn deleting_a_task_takes_its_steps_and_restore_brings_them_back() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(&mut conn, "Ship", None, None, now(), "dev")
+            .unwrap()
+            .task;
+        let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+
+        let gone = delete(&mut conn, &parent.id, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(gone, [parent.id.clone(), step.id.clone()]);
+        assert!(tasks(&conn).unwrap().is_empty());
+
+        let restored = restore(&mut conn, &parent.id, now() + 2, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored
+                .steps
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            [step.id.as_str()],
+            "undo brings the steps back with the task"
+        );
+        assert_eq!(
+            task(&conn, &step.id).unwrap().map(|s| s.title),
+            Some("Write".to_owned())
+        );
+    }
+
+    #[test]
+    fn moving_a_task_moves_its_steps_in_the_same_write() {
+        let mut conn = db::open_in_memory().unwrap();
+        let created = create(
+            &mut conn,
+            "Ship the release",
+            Some("Launch"),
+            None,
+            now(),
+            "dev",
+        )
+        .unwrap();
+        let parent = created.task;
+        let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+        let studio = create_list(&mut conn, "Studio", now(), "dev").unwrap();
+
+        set_list(&mut conn, &parent.id, Some(&studio.id), now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            task(&conn, &step.id).unwrap().unwrap().list_name.as_deref(),
+            Some("Studio"),
+            "a step is filed where its task is"
+        );
+        // create task, its project, the step, the Studio project, and the two
+        // project moves (task and step)
+        assert_eq!(oplog::len(&conn).unwrap(), 6);
+
+        // Moving to no project takes the steps with it.
+        set_list(&mut conn, &parent.id, None, now() + 2, "dev")
+            .unwrap()
+            .unwrap();
+        assert_eq!(task(&conn, &step.id).unwrap().unwrap().list_id, None);
+    }
+
+    #[test]
+    fn a_step_is_deleted_on_its_own_without_touching_its_parent() {
+        let mut conn = db::open_in_memory().unwrap();
+        let parent = create(&mut conn, "Ship", None, None, now(), "dev")
+            .unwrap()
+            .task;
+        let step = create_subtask(&mut conn, &parent.id, "Write", now(), "dev").unwrap();
+
+        let gone = delete(&mut conn, &step.id, now() + 1, "dev")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(gone, [step.id.as_str()]);
+        assert!(task(&conn, &parent.id).unwrap().is_some());
+        assert_eq!(tasks(&conn).unwrap().len(), 1);
     }
 }

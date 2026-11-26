@@ -100,6 +100,14 @@ assert!(rt.state.tasks[0].done);
   A project chip's `⋯` opens Rename… and Delete project; a rename is a field on
   the chip (a refused name stays open with the reason), and a delete releases
   its tasks to No project, drops the filter to All and offers the same undo.
+  A row breaks into steps: the expanded row's STEPS section lists them with
+  checkboxes, a `1/3` chip sits on the collapsed row, and Return in the
+  add-step field shows the step under its task at once and keeps the field open
+  for the next one; the store's row replaces the temporary one, a refusal puts
+  the line back under the same task (the task add row is untouched), steps are
+  not counted as open tasks or listed at the top level or in the archive,
+  completing a task sends one `SetTaskDone` for it, and the toast's Undo asks to
+  reopen the task and each step that check closed.
 - PNG snapshots (`--snap`): attached for human review, not pixel-diffed.
 - Every interactive element must have a role and a non-empty label; a test fails
   otherwise.
@@ -135,7 +143,11 @@ assert!(rt.state.tasks[0].done);
   row, and letting the toast pass leaves it gone; a rename, a move to no
   project and a task note all come back from a relist; renaming a project
   renames its tasks' filing, and deleting it keeps the tasks, unfiles them, and
-  undo refiles them into the restored project.
+  undo refiles them into the restored project. A step typed under a task is
+  saved with its parent and the task's project, the expanded row draws it,
+  completing the task closes it in the same write, Undo reopens both, a restart
+  reads the step back under its task, and deleting a task takes its step with
+  the toast's undo bringing both back.
 - `apps/open-notex/tests/vault.rs` covers the launch and the dialog without a
   window: `--vault` aside, the saved folder wins over the suggested one, a saved
   folder that is gone asks and is never replaced by the default, a broken config

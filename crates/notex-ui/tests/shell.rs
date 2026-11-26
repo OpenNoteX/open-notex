@@ -915,6 +915,7 @@ fn tasks_state() -> State {
             due_day: due_day.map(str::to_owned),
             completed_at: completed_day.map(|_| 1_763_500_800_000),
             completed_day: completed_day.map(str::to_owned),
+            parent_id: None,
         }
     };
 
@@ -1185,6 +1186,7 @@ fn the_store_row_takes_the_optimistic_rows_place() {
         due_day: None,
         completed_at: None,
         completed_day: None,
+        parent_id: None,
     });
     rt.invalidate();
     rt.frame(1.0 / 60.0);
@@ -1240,6 +1242,231 @@ fn an_empty_add_row_asks_for_nothing() {
     click(&mut rt, "task-add-input");
     press(&mut rt, Key::Enter);
     assert_eq!(rt.state.take_action(), None);
+}
+
+#[test]
+fn a_step_is_typed_under_its_task_and_shows_at_once() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-expand-01T1");
+    settle(&mut rt);
+
+    assert!(rt.find("task-steps-01T1").is_some(), "the STEPS section");
+    click(&mut rt, "task-step-new-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-input-01T1");
+    rt.paste("Write the notes");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+
+    assert!(
+        rt.find("task-step-new-0").is_some(),
+        "the step is under the task before the store answers"
+    );
+    assert_eq!(
+        rt.state.take_action(),
+        Some(Action::CreateSubtask {
+            parent_id: "01T1".to_owned(),
+            title: "Write the notes".to_owned(),
+        })
+    );
+    // A run of steps is a run of lines: the field stays open and empty.
+    assert_eq!(
+        rt.state
+            .step_input
+            .as_ref()
+            .map(|step| step.edit.text.as_str()),
+        Some("")
+    );
+    assert!(
+        rt.find("task-row-new-0").is_none(),
+        "a step is not a top-level row"
+    );
+}
+
+#[test]
+fn the_store_row_takes_the_optimistic_steps_place() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-expand-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-new-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-input-01T1");
+    rt.paste("Write the notes");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.take_action().is_some());
+
+    rt.state.task_changed(notex_ui::TaskRow {
+        id: "01T9".to_owned(),
+        title: "Write the notes".to_owned(),
+        notes: String::new(),
+        done: false,
+        list_id: Some("01L1".to_owned()),
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: None,
+        completed_day: None,
+        parent_id: Some("01T1".to_owned()),
+    });
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+
+    assert!(
+        rt.find("task-step-new-0").is_none(),
+        "the temporary step is gone"
+    );
+    assert!(rt.find("task-step-01T9").is_some(), "the real step is here");
+    assert_eq!(
+        rt.state.steps_of("01T1").len(),
+        1,
+        "the step is not listed twice"
+    );
+    assert!(rt.state.pending_adds.is_empty());
+}
+
+#[test]
+fn a_refused_step_puts_the_line_back_under_its_task() {
+    let mut rt = runtime(tasks_state());
+    click(&mut rt, "nav-tasks");
+    settle(&mut rt);
+    click(&mut rt, "task-expand-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-new-01T1");
+    settle(&mut rt);
+    click(&mut rt, "task-step-input-01T1");
+    rt.paste("Write the notes");
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.take_action().is_some());
+
+    rt.state.add_failed("That task is gone.");
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+
+    assert!(
+        rt.find("task-step-new-0").is_none(),
+        "the refused step is gone"
+    );
+    assert_eq!(
+        rt.state
+            .step_input
+            .as_ref()
+            .map(|step| (step.parent_id.as_str(), step.edit.text.as_str())),
+        Some(("01T1", "Write the notes")),
+        "the line is back in the field it came from"
+    );
+    assert_eq!(
+        rt.state.add_task.text, "",
+        "the task add row was not touched"
+    );
+    assert_eq!(label_of(&rt, "task-error-text"), "That task is gone.");
+}
+
+#[test]
+fn steps_are_not_counted_as_tasks_of_their_own() {
+    let mut rt = runtime(tasks_state());
+    let before = rt.state.open_task_count();
+    rt.state.task_changed(notex_ui::TaskRow {
+        id: "01T9".to_owned(),
+        title: "Write the notes".to_owned(),
+        notes: String::new(),
+        done: false,
+        list_id: Some("01L1".to_owned()),
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: None,
+        completed_day: None,
+        parent_id: Some("01T1".to_owned()),
+    });
+    assert_eq!(rt.state.open_task_count(), before, "the step is not a task");
+    assert!(
+        rt.state.visible_tasks().all(|task| task.id != "01T9"),
+        "the checklist's top level leaves steps out"
+    );
+    assert_eq!(rt.state.steps_of("01T1").len(), 1);
+
+    // And a done step is not in the archive either.
+    rt.state.task_changed(notex_ui::TaskRow {
+        id: "01T9".to_owned(),
+        title: "Write the notes".to_owned(),
+        notes: String::new(),
+        done: true,
+        list_id: Some("01L1".to_owned()),
+        list_name: Some("Launch".to_owned()),
+        list_color: Some("#3f8f6b".to_owned()),
+        due_day: None,
+        completed_at: Some(1_763_500_800_000),
+        completed_day: Some("2026-11-19".to_owned()),
+        parent_id: Some("01T1".to_owned()),
+    });
+    assert!(rt.state.archived().iter().all(|task| task.id != "01T9"));
+}
+
+#[test]
+fn completing_a_task_closes_its_steps_and_undo_reopens_them() {
+    let mut state = tasks_state();
+    state.set_tasks(
+        state
+            .tasks
+            .iter()
+            .cloned()
+            .chain(["01S1", "01S2"].into_iter().map(|id| notex_ui::TaskRow {
+                id: id.to_owned(),
+                title: format!("Step {id}"),
+                notes: String::new(),
+                done: false,
+                list_id: Some("01L1".to_owned()),
+                list_name: Some("Launch".to_owned()),
+                list_color: Some("#3f8f6b".to_owned()),
+                due_day: None,
+                completed_at: None,
+                completed_day: None,
+                parent_id: Some("01T1".to_owned()),
+            }))
+            .collect(),
+    );
+    assert_eq!(state.open_steps_of("01T1"), 2);
+
+    // One write: the store closes the open steps with the task, in the same
+    // transaction, so the UI sends the task and nothing else.
+    state.toggle_task("01T1");
+    assert_eq!(
+        state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T1".to_owned(),
+            done: true,
+        })
+    );
+
+    // The toast's undo takes the whole check back, not just the parent.
+    state.undo_task();
+    assert_eq!(
+        state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01T1".to_owned(),
+            done: false,
+        })
+    );
+    assert_eq!(
+        state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01S1".to_owned(),
+            done: false,
+        })
+    );
+    assert_eq!(
+        state.take_action(),
+        Some(Action::SetTaskDone {
+            id: "01S2".to_owned(),
+            done: false,
+        })
+    );
 }
 
 #[test]
